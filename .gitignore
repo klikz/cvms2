@@ -1,0 +1,14 @@
+# build output
+builds/
+
+# synced copies of shared/ui (created by `make sync-ui`)
+client/web/shared/
+server/web/shared/
+
+# runtime data created on first start
+config.yaml
+config.yaml.tmp
+client.key
+*.db
+*.db-shm
+*.db-wal

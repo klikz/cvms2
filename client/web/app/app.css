@@ -1,0 +1,28 @@
+/* Client-specific tweaks on top of the shared design system. */
+.tile > img.loading { opacity: .85; }
+.tile .refresh-dot { position: absolute; top: 8px; right: 8px; z-index: 3; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); opacity: 0; transition: opacity var(--t-fast); }
+.tile.busy .refresh-dot { opacity: 1; }
+.viewer-body img { transition: none; }
+.viewer-foot { padding: 0 16px 12px; color: var(--text-3); font-size: var(--fs-xs); text-align: center; }
+
+.conn-card { display: flex; align-items: center; gap: var(--sp-4); }
+.conn-icon { width: 46px; height: 46px; border-radius: var(--r-lg); display: grid; place-items: center; flex: none; background: var(--surface-3); color: var(--text-2); }
+.conn-icon svg { width: 22px; height: 22px; }
+.conn-icon.ok { background: var(--ok-soft); color: var(--ok); }
+.conn-icon.warn { background: var(--warn-soft); color: var(--warn); }
+.conn-icon.danger { background: var(--danger-soft); color: var(--danger); }
+.conn-title { font-weight: 600; font-size: var(--fs-lg); }
+.notice { display: flex; gap: 10px; padding: 10px 14px; border-radius: var(--r-md); background: var(--warn-soft); color: var(--warn); font-size: var(--fs-sm); margin-bottom: var(--sp-4); align-items: flex-start; }
+.notice svg { width: 16px; height: 16px; flex: none; margin-top: 1px; }
+.notice.info { background: var(--accent-soft); color: var(--accent); }
+.notice.danger { background: var(--danger-soft); color: var(--danger); }
+
+.add-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: var(--sp-4); align-items: start; }
+.add-grid .card + .card { margin-top: 0; }
+.dev-list { display: flex; flex-direction: column; gap: 6px; }
+.dev { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--r-md); }
+.dev .grow b { display: block; }
+.dev .grow span { font-size: var(--fs-xs); color: var(--text-3); }
+.profile-box { background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--r-md); padding: 12px; margin-bottom: 16px; }
+.probe-result { display: flex; align-items: center; gap: 6px; font-size: var(--fs-sm); margin-top: -8px; margin-bottom: 12px; min-height: 20px; }
+.cam-thumb { width: 96px; aspect-ratio: 16/9; object-fit: cover; border-radius: var(--r-sm); background: #05070a; display: block; }

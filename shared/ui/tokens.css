@@ -1,0 +1,106 @@
+/* CVMS design tokens — shared by client and server UI. */
+:root {
+  color-scheme: dark;
+
+  /* surfaces */
+  --bg: #0b0e14;
+  --bg-elev: #11151d;
+  --surface: #161b25;
+  --surface-2: #1c2230;
+  --surface-3: #232b3b;
+  --overlay: rgba(5, 7, 11, 0.72);
+
+  /* lines */
+  --border: #262e3e;
+  --border-strong: #34405a;
+
+  /* text */
+  --text: #e6e9f0;
+  --text-2: #a3abbd;
+  --text-3: #6c768c;
+  --text-inv: #0b0e14;
+
+  /* accent */
+  --accent: #4c8dff;
+  --accent-hover: #6aa1ff;
+  --accent-soft: rgba(76, 141, 255, 0.14);
+  --accent-ring: rgba(76, 141, 255, 0.45);
+
+  /* status */
+  --ok: #2fbf71;
+  --ok-soft: rgba(47, 191, 113, 0.14);
+  --warn: #f2a93b;
+  --warn-soft: rgba(242, 169, 59, 0.14);
+  --danger: #f0525f;
+  --danger-soft: rgba(240, 82, 95, 0.14);
+  --info: #9b7bff;
+  --info-soft: rgba(155, 123, 255, 0.14);
+
+  /* type */
+  --font: "Inter", "Segoe UI", system-ui, -apple-system, Roboto, Ubuntu, "Helvetica Neue", Arial, sans-serif;
+  --mono: "JetBrains Mono", "Cascadia Code", Consolas, "Ubuntu Mono", monospace;
+  --fs-xs: 11px;
+  --fs-sm: 12.5px;
+  --fs-md: 13.5px;
+  --fs-lg: 15px;
+  --fs-xl: 18px;
+  --fs-2xl: 22px;
+
+  /* spacing */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+
+  /* shape */
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+  --r-full: 999px;
+
+  /* depth */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 18px 50px rgba(0, 0, 0, 0.5);
+
+  /* layout */
+  --sidebar-w: 240px;
+  --topbar-h: 56px;
+
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --t-fast: 120ms;
+  --t-med: 200ms;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: var(--fs-md);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-hover); }
+
+::selection { background: var(--accent-soft); }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: var(--r-full); border: 2px solid var(--bg); }
+::-webkit-scrollbar-track { background: transparent; }
+
+:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: 2px; }
+
+.mono { font-family: var(--mono); }
+.muted { color: var(--text-2); }
+.dim { color: var(--text-3); }
+.hidden { display: none !important; }
