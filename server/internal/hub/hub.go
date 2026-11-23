@@ -17,7 +17,6 @@ import (
 	"cvms/server/internal/config"
 	"cvms/server/internal/db"
 	"cvms/shared/ffmpegx"
-	"cvms/shared/media"
 	"cvms/shared/protocol"
 )
 
@@ -27,77 +26,6 @@ var (
 	ErrTimeout       = errors.New("timeout")
 	ErrNoCamera      = errors.New("camera not found")
 )
-
-// Frame is one H.264 access unit delivered to viewers.
-type Frame struct {
-	AU  media.AU
-	TS  int64 // microseconds
-	Key bool
-	SPS []byte
-	PPS []byte
-}
-
-// Viewer receives frames of one stream.
-type Viewer struct {
-	ch      chan Frame
-	done    chan struct{}
-	once    sync.Once
-	needKey bool
-	s       *stream
-	Camera  *db.Camera
-	Profile string
-}
-
-// Frames returns the frame channel.
-func (v *Viewer) Frames() <-chan Frame { return v.ch }
-
-// Done is closed when the hub drops the viewer (camera removed, client blocked).
-func (v *Viewer) Done() <-chan struct{} { return v.done }
-
-func (v *Viewer) close() { v.once.Do(func() { close(v.done) }) }
-
-// push is called with hub.mu held.
-func (v *Viewer) push(f Frame) {
-	if v.needKey {
-		if !f.Key {
-			return
-		}
-		v.needKey = false
-	}
-	select {
-	case v.ch <- f:
-	default:
-		v.needKey = true // viewer too slow: drop until next keyframe
-	}
-}
-
-type streamKey struct {
-	cam     int64
-	profile string
-}
-
-// run is one upstream session of a stream (one stream_start .. stop).
-type run struct {
-	id         uint32
-	codec      string // codec pushed by the client
-	transcoded bool   // client transcoded H.265 -> H.264
-	tc         *transcoder
-	inParams   media.ParamCache
-	outParams  media.ParamCache
-	gotKey     bool
-}
-
-type stream struct {
-	key         streamKey
-	clientID    int64
-	camUID      string
-	viewers     map[*Viewer]struct{}
-	run         *run
-	lastFrame   time.Time
-	lastAttempt time.Time
-	lastErr     string
-	idleTimer   *time.Timer
-}
 
 type snapResult struct {
 	data []byte
@@ -116,11 +44,19 @@ type snapEntry struct {
 }
 
 // Hub is the central router.
+//
+// Locking: hub.mu guards the maps (conns, streams, byID, snapshots) and
+// conn.status. Each stream has its own mutex for its viewers and run, so
+// frame delivery never takes hub.mu. Order: hub.mu before stream.mu.
 type Hub struct {
 	db     *db.DB
 	cfg    *config.Config
 	Events *Events
 	ffmpeg string
+
+	pipeMu   sync.Mutex
+	pipe     ffmpegx.Pipeline
+	pipeDone bool
 
 	mu           sync.Mutex
 	conns        map[int64]*conn
@@ -134,7 +70,7 @@ type Hub struct {
 
 // New creates a hub.
 func New(d *db.DB, cfg *config.Config) *Hub {
-	h := &Hub{
+	return &Hub{
 		db:           d,
 		cfg:          cfg,
 		Events:       NewEvents(),
@@ -146,21 +82,30 @@ func New(d *db.DB, cfg *config.Config) *Hub {
 		snapInflight: map[string]*snapCall{},
 		snapCache:    map[string]snapEntry{},
 	}
-	return h
 }
 
 // FFmpeg returns the resolved ffmpeg path.
 func (h *Hub) FFmpeg() string { return h.ffmpeg }
 
+// Pipeline returns the decode/encode pipeline used for H.265 -> H.264.
+func (h *Hub) Pipeline() ffmpegx.Pipeline {
+	h.pipeMu.Lock()
+	defer h.pipeMu.Unlock()
+	if !h.pipeDone {
+		h.pipe = ffmpegx.PickPipeline(h.ffmpeg, h.cfg.HWAccel, h.cfg.H264Encoder, h.cfg.GPUDevice)
+		h.pipeDone = true
+	}
+	return h.pipe
+}
+
 // Run runs background maintenance until ctx is done.
 func (h *Hub) Run(ctx context.Context) {
 	if ffmpegx.Available(h.ffmpeg) {
 		go func() {
-			enc := ffmpegx.PickEncoder(h.ffmpeg, h.cfg.H264Encoder)
-			log.Printf("transcode encoder for H.265 -> H.264: %s", enc)
+			log.Printf("H.265 -> H.264 fallback pipeline: %s (fallback location: %s)", h.Pipeline().Name, h.cfg.H265Fallback)
 		}()
 	} else {
-		log.Printf("WARNING: ffmpeg not found (%s); H.265 cameras need transcode_mode=client on clients", h.ffmpeg)
+		log.Printf("WARNING: ffmpeg not found (%s); browsers without H.265 support need h265_fallback: client", h.ffmpeg)
 	}
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
@@ -187,24 +132,47 @@ func (h *Hub) watchdog() {
 	defer h.mu.Unlock()
 	now := time.Now()
 	for _, s := range h.streams {
-		if len(s.viewers) == 0 {
+		s.mu.Lock()
+		n := len(s.viewers)
+		running := s.run != nil
+		stale := running && now.Sub(s.lastFrame) > 20*time.Second
+		retry := !running && now.Sub(s.lastAttempt) >= 5*time.Second
+		s.mu.Unlock()
+		if n == 0 {
 			continue
 		}
-		if s.run != nil && now.Sub(s.lastFrame) > 20*time.Second {
+		if stale {
 			log.Printf("stream cam=%d %s: no data, restarting", s.key.cam, s.key.profile)
 			h.stopLocked(s, true)
-		}
-		if s.run == nil && now.Sub(s.lastAttempt) >= 5*time.Second {
+		} else if retry {
 			h.startLocked(s)
 		}
 	}
-	// expire snapshot cache
 	ttl := time.Duration(h.cfg.SnapshotCacheSeconds) * time.Second * 6
 	for k, e := range h.snapCache {
 		if now.Sub(e.at) > ttl {
 			delete(h.snapCache, k)
 		}
 	}
+}
+
+// Stats returns live counters for the UI.
+func (h *Hub) Stats() map[string]int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	st := map[string]int{"streams": 0, "viewers": 0, "transcodes": 0, "clients_connected": len(h.conns)}
+	for _, s := range h.streams {
+		s.mu.Lock()
+		if s.run != nil {
+			st["streams"]++
+			if s.run.tc != nil {
+				st["transcodes"]++
+			}
+		}
+		st["viewers"] += len(s.viewers)
+		s.mu.Unlock()
+	}
+	return st
 }
 
 // ---------------------------------------------------------------- client status API
@@ -243,7 +211,7 @@ func (h *Hub) Block(clientID int64) error {
 		c.status = protocol.StatusBlocked
 		c.sendJSON(protocol.TypeStatus, protocol.Status{Status: protocol.StatusBlocked})
 	}
-	h.dropClientStreamsLocked(clientID)
+	h.dropStreamsLocked(func(s *stream) bool { return s.clientID == clientID })
 	h.mu.Unlock()
 	h.Events.PublishDebounced("clients")
 	return nil
@@ -252,7 +220,7 @@ func (h *Hub) Block(clientID int64) error {
 // Delete removes a client entirely.
 func (h *Hub) Delete(clientID int64) error {
 	h.mu.Lock()
-	h.dropClientStreamsLocked(clientID)
+	h.dropStreamsLocked(func(s *stream) bool { return s.clientID == clientID })
 	c := h.conns[clientID]
 	if c != nil {
 		c.sendJSON(protocol.TypeStatus, protocol.Status{Status: protocol.StatusUnauthorized, Message: "deleted"})
@@ -266,229 +234,6 @@ func (h *Hub) Delete(clientID int64) error {
 	}
 	h.Events.PublishDebounced("clients")
 	return nil
-}
-
-func (h *Hub) dropClientStreamsLocked(clientID int64) {
-	for k, s := range h.streams {
-		if s.clientID != clientID {
-			continue
-		}
-		h.stopLocked(s, true)
-		for v := range s.viewers {
-			v.close()
-		}
-		if s.idleTimer != nil {
-			s.idleTimer.Stop()
-		}
-		delete(h.streams, k)
-	}
-}
-
-func (h *Hub) startClientStreamsLocked(clientID int64) {
-	for _, s := range h.streams {
-		if s.clientID == clientID && s.run == nil && len(s.viewers) > 0 {
-			h.startLocked(s)
-		}
-	}
-}
-
-// ---------------------------------------------------------------- streams
-
-// Subscribe adds a viewer to the camera stream, starting it if needed.
-func (h *Hub) Subscribe(cam *db.Camera, profile string) (*Viewer, error) {
-	if profile != protocol.ProfileMain {
-		profile = protocol.ProfileSub
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	key := streamKey{cam.ID, profile}
-	s := h.streams[key]
-	if s == nil {
-		s = &stream{key: key, clientID: cam.ClientID, camUID: cam.CamUID, viewers: map[*Viewer]struct{}{}}
-		h.streams[key] = s
-	}
-	if s.idleTimer != nil {
-		s.idleTimer.Stop()
-		s.idleTimer = nil
-	}
-	v := &Viewer{ch: make(chan Frame, 90), done: make(chan struct{}), needKey: true, s: s, Camera: cam, Profile: profile}
-	s.viewers[v] = struct{}{}
-	if s.run == nil {
-		h.startLocked(s)
-	}
-	return v, nil
-}
-
-// Unsubscribe removes a viewer. The upstream stops after the idle delay.
-func (h *Hub) Unsubscribe(v *Viewer) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	v.close()
-	s := v.s
-	if _, ok := s.viewers[v]; !ok {
-		return
-	}
-	delete(s.viewers, v)
-	if len(s.viewers) > 0 {
-		return
-	}
-	idle := time.Duration(h.cfg.StreamIdleSeconds) * time.Second
-	s.idleTimer = time.AfterFunc(idle, func() {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		if len(s.viewers) == 0 && h.streams[s.key] == s {
-			h.stopLocked(s, true)
-			delete(h.streams, s.key)
-		}
-	})
-}
-
-// StreamInfo returns the input codec and whether it is transcoded.
-func (h *Hub) StreamInfo(v *Viewer) (codec string, transcoded bool, lastErr string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if r := v.s.run; r != nil {
-		return r.codec, r.codec == protocol.CodecH265 || r.transcoded, v.s.lastErr
-	}
-	return "", false, v.s.lastErr
-}
-
-func (h *Hub) startLocked(s *stream) {
-	s.lastAttempt = time.Now()
-	c := h.conns[s.clientID]
-	if c == nil || c.status != protocol.StatusApproved {
-		return
-	}
-	h.nextID++
-	if h.nextID == 0 {
-		h.nextID = 1
-	}
-	r := &run{id: h.nextID}
-	r.outParams.Codec = protocol.CodecH264
-	s.run = r
-	s.lastFrame = time.Now()
-	h.byID[r.id] = s
-	c.sendJSON(protocol.TypeStreamStart, protocol.StreamStart{StreamID: r.id, CameraID: s.camUID, Profile: s.key.profile})
-}
-
-func (h *Hub) stopLocked(s *stream, notify bool) {
-	r := s.run
-	if r == nil {
-		return
-	}
-	s.run = nil
-	delete(h.byID, r.id)
-	if r.tc != nil {
-		r.tc.Close()
-	}
-	if notify {
-		if c := h.conns[s.clientID]; c != nil {
-			c.sendJSON(protocol.TypeStreamStop, protocol.StreamStop{StreamID: r.id})
-		}
-	}
-}
-
-// onStreamInfo is called when the client reports the codec it pushes.
-func (h *Hub) onStreamInfo(c *conn, m protocol.StreamInfoMsg) {
-	h.mu.Lock()
-	s := h.byID[m.StreamID]
-	if s == nil || s.clientID != c.clientID || s.run == nil {
-		h.mu.Unlock()
-		return
-	}
-	r := s.run
-	r.codec = m.Codec
-	r.transcoded = m.Transcoded
-	r.inParams.Codec = m.Codec
-	s.lastErr = ""
-	h.mu.Unlock()
-
-	if m.Codec == protocol.CodecH265 {
-		go h.startTranscoder(s, r)
-	}
-}
-
-func (h *Hub) startTranscoder(s *stream, r *run) {
-	enc := ffmpegx.PickEncoder(h.ffmpeg, h.cfg.H264Encoder)
-	tc, err := newTranscoder(h.ffmpeg, enc, func(au media.AU) {
-		h.deliver(s, r, au, time.Now().UnixMicro())
-	})
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if err != nil {
-		log.Printf("transcoder start: %v", err)
-		s.lastErr = "transcoder: " + err.Error()
-		if s.run == r {
-			h.stopLocked(s, true)
-		}
-		return
-	}
-	if s.run != r {
-		tc.Close()
-		return
-	}
-	r.tc = tc
-}
-
-func (h *Hub) onStreamError(c *conn, m protocol.StreamError) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	s := h.byID[m.StreamID]
-	if s == nil || s.clientID != c.clientID {
-		return
-	}
-	log.Printf("stream cam=%d %s error: %s", s.key.cam, s.key.profile, m.Error)
-	s.lastErr = m.Error
-	h.stopLocked(s, false)
-}
-
-// onVideo handles an access unit pushed by a client.
-func (h *Hub) onVideo(c *conn, f protocol.BinFrame) {
-	h.mu.Lock()
-	s := h.byID[f.ID]
-	if s == nil || s.clientID != c.clientID || s.run == nil {
-		h.mu.Unlock()
-		return
-	}
-	r := s.run
-	codec, tc := r.codec, r.tc
-	s.lastFrame = time.Now()
-	h.mu.Unlock()
-
-	au := media.AU(media.SplitNALUs(f.Payload))
-	if len(au) == 0 {
-		return
-	}
-	switch codec {
-	case protocol.CodecH264:
-		h.deliver(s, r, au, f.TS)
-	case protocol.CodecH265:
-		if tc == nil {
-			return
-		}
-		au = r.inParams.Fix(au)
-		if !r.gotKey {
-			if !media.IsKeyframe(protocol.CodecH265, au) {
-				return
-			}
-			r.gotKey = true
-		}
-		tc.Write(au)
-	}
-}
-
-func (h *Hub) deliver(s *stream, r *run, au media.AU, ts int64) {
-	au = r.outParams.Fix(au)
-	f := Frame{AU: au, TS: ts, Key: media.IsKeyframe(protocol.CodecH264, au), SPS: r.outParams.SPS, PPS: r.outParams.PPS}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if s.run != r {
-		return
-	}
-	s.lastFrame = time.Now()
-	for v := range s.viewers {
-		v.push(f)
-	}
 }
 
 // ---------------------------------------------------------------- snapshots
@@ -516,7 +261,6 @@ func (h *Hub) Snapshot(ctx context.Context, cam *db.Camera, profile string) ([]b
 	}
 	c := h.conns[cam.ClientID]
 	if c == nil || c.status != protocol.StatusApproved {
-		// serve a stale snapshot if we have one
 		if e, ok := h.snapCache[key]; ok {
 			h.mu.Unlock()
 			return e.data, nil
@@ -524,8 +268,7 @@ func (h *Hub) Snapshot(ctx context.Context, cam *db.Camera, profile string) ([]b
 		h.mu.Unlock()
 		return nil, ErrClientOffline
 	}
-	h.nextID++
-	id := h.nextID
+	id := h.newIDLocked()
 	ch := make(chan snapResult, 1)
 	h.snaps[id] = ch
 	call := &snapCall{done: make(chan struct{})}
@@ -534,7 +277,7 @@ func (h *Hub) Snapshot(ctx context.Context, cam *db.Camera, profile string) ([]b
 	h.mu.Unlock()
 
 	var res snapResult
-	timer := time.NewTimer(15 * time.Second)
+	timer := time.NewTimer(20 * time.Second)
 	select {
 	case res = <-ch:
 	case <-timer.C:
@@ -572,6 +315,14 @@ func (h *Hub) resolveSnapshot(id uint32, data []byte, err error) {
 	case ch <- snapResult{data: data, err: err}:
 	default:
 	}
+}
+
+func (h *Hub) newIDLocked() uint32 {
+	h.nextID++
+	if h.nextID == 0 {
+		h.nextID = 1
+	}
+	return h.nextID
 }
 
 // ---------------------------------------------------------------- client connections
@@ -707,12 +458,13 @@ func (h *Hub) HandleClientWS(w http.ResponseWriter, r *http.Request, ip string, 
 	}
 	h.mu.Unlock()
 	log.Printf("client connected: %s (%s) status=%s", cl.Name, ip, cl.Status)
-	h.Events.PublishDebounced("clients")
+	h.Events.Publish("client_status", map[string]any{"client_id": cl.ID, "online": true, "last_seen": db.Now()})
 
 	defer func() {
 		c.close()
 		h.mu.Lock()
-		if h.conns[cl.ID] == c {
+		current := h.conns[cl.ID] == c
+		if current {
 			delete(h.conns, cl.ID)
 			for _, s := range h.streams {
 				if s.clientID == cl.ID {
@@ -721,10 +473,13 @@ func (h *Hub) HandleClientWS(w http.ResponseWriter, r *http.Request, ip string, 
 			}
 		}
 		h.mu.Unlock()
+		if !current {
+			return
+		}
 		_ = h.db.SetClientCamerasOffline(cl.ID)
 		_ = h.db.TouchClient(cl.ID)
 		log.Printf("client disconnected: %s", cl.Name)
-		h.Events.PublishDebounced("clients")
+		h.Events.Publish("client_status", map[string]any{"client_id": cl.ID, "online": false, "last_seen": db.Now()})
 	}()
 
 	ws.SetPongHandler(func(string) error {
@@ -773,20 +528,14 @@ func (h *Hub) handleControl(c *conn, env protocol.Envelope) {
 			log.Printf("sync cameras: %v", err)
 			return
 		}
-		// drop viewers of cameras the client no longer has
 		h.mu.Lock()
-		for k, s := range h.streams {
+		h.dropStreamsLocked(func(s *stream) bool {
 			if s.clientID != c.clientID {
-				continue
+				return false
 			}
-			if _, ok := ids[s.camUID]; !ok {
-				h.stopLocked(s, true)
-				for v := range s.viewers {
-					v.close()
-				}
-				delete(h.streams, k)
-			}
-		}
+			_, ok := ids[s.camUID]
+			return !ok
+		})
 		h.mu.Unlock()
 		h.Events.PublishDebounced("clients")
 	case protocol.TypeCameraStatus:
@@ -794,8 +543,10 @@ func (h *Hub) handleControl(c *conn, env protocol.Envelope) {
 		if json.Unmarshal(env.Data, &m) != nil {
 			return
 		}
-		_ = h.db.SetCameraOnline(c.clientID, m.ID, m.Online)
-		h.Events.PublishDebounced("clients")
+		id, err := h.db.SetCameraOnline(c.clientID, m.ID, m.Online)
+		if err == nil && id > 0 {
+			h.Events.Publish("camera_status", map[string]any{"camera_id": id, "client_id": c.clientID, "online": m.Online})
+		}
 	case protocol.TypeStreamInfo:
 		var m protocol.StreamInfoMsg
 		if json.Unmarshal(env.Data, &m) == nil {

@@ -69,6 +69,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		out["pending"] = nPending
 		users, _ := s.db.CountUsers()
 		out["users"] = users
+		out["pipeline"] = s.hub.Pipeline()
+		out["h265_fallback"] = s.cfg.H265Fallback
+		out["live"] = s.hub.Stats()
 	}
 	writeJSON(w, out)
 }
@@ -256,6 +259,9 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) viewAudit(r *http.Request, cam *db.Camera, profile string) func() {
+	if s.cfg.AuditViews == "none" || (s.cfg.AuditViews == "main" && profile != protocol.ProfileMain) {
+		return nil
+	}
 	u, ip := userFrom(r), s.clientIP(r)
 	start := time.Now()
 	s.audit(u, ip, "view_start", cam.Name, profile)
@@ -281,7 +287,8 @@ func (s *Server) handleWebRTC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	profile := profileParam(r)
-	v, err := s.hub.Subscribe(cam, profile)
+	h265OK := stream.OfferHasH265(req.SDP) && r.URL.Query().Get("codec") != "h264"
+	v, err := s.hub.Subscribe(cam, profile, h265OK)
 	if err != nil {
 		internalError(w, err)
 		return
@@ -293,7 +300,13 @@ func (s *Server) handleWebRTC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	codec, transcoded, _ := s.hub.StreamInfo(v)
-	writeJSON(w, map[string]any{"sdp": answer, "codec": codec, "transcoded": transcoded})
+	if codec == "" {
+		codec = cam.Main.Codec
+		if profile == protocol.ProfileSub && cam.Sub.Available {
+			codec = cam.Sub.Codec
+		}
+	}
+	writeJSON(w, map[string]any{"sdp": answer, "codec": codec, "delivered": v.Codec, "transcoded": transcoded || (codec == protocol.CodecH265 && v.Codec == protocol.CodecH264)})
 }
 
 func (s *Server) handleMSE(w http.ResponseWriter, r *http.Request) {
@@ -302,7 +315,7 @@ func (s *Server) handleMSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	profile := profileParam(r)
-	v, err := s.hub.Subscribe(cam, profile)
+	v, err := s.hub.Subscribe(cam, profile, r.URL.Query().Get("codec") == "h265")
 	if err != nil {
 		internalError(w, err)
 		return

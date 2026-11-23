@@ -34,6 +34,7 @@ type Manager struct {
 	inflight map[string]*call
 	onChange func(id string, online bool)
 	kick     chan struct{}
+	sem      chan struct{}
 }
 
 type snap struct {
@@ -60,6 +61,7 @@ func New(store *config.Store) *Manager {
 		snaps:    map[string]snap{},
 		inflight: map[string]*call{},
 		kick:     make(chan struct{}, 1),
+		sem:      make(chan struct{}, store.Get().SnapshotConcurrency),
 	}
 }
 
@@ -88,6 +90,8 @@ func (m *Manager) Kick() {
 func (m *Manager) Run(ctx context.Context) {
 	if !ffmpegx.Available(m.ffmpeg) {
 		log.Printf("WARNING: ffmpeg not found (%s). Install ffmpeg or set ffmpeg_path in config.yaml", m.ffmpeg)
+	} else {
+		go func() { log.Printf("video pipeline: %s", m.Pipeline().Name) }()
 	}
 	for {
 		m.checkAll(ctx)
@@ -281,8 +285,15 @@ func (m *Manager) Snapshot(ctx context.Context, id, profile string, maxAge time.
 	m.inflight[key] = c
 	m.mu.Unlock()
 
-	u, _ := cam.StreamURL(profile)
-	c.data, c.err = m.grab(u, profile == protocol.ProfileMain)
+	u, st := cam.StreamURL(profile)
+	if st.SnapshotURL != "" {
+		hctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		c.data, c.err = httpSnapshot(hctx, st.SnapshotURL, cam.Username, cam.Password)
+		cancel()
+	}
+	if st.SnapshotURL == "" || c.err != nil {
+		c.data, c.err = m.grab(u, profile == protocol.ProfileMain, st.Codec)
+	}
 
 	m.mu.Lock()
 	delete(m.inflight, key)
@@ -297,14 +308,29 @@ func (m *Manager) Snapshot(ctx context.Context, id, profile string, maxAge time.
 	return c.data, c.err
 }
 
-// grab runs ffmpeg to capture one frame as JPEG.
-func (m *Manager) grab(rtspURL string, limit bool) ([]byte, error) {
+// Pipeline returns the GPU/CPU pipeline used for decoding and transcoding.
+func (m *Manager) Pipeline() ffmpegx.Pipeline {
+	c := m.store.Get()
+	return ffmpegx.PickPipeline(m.ffmpeg, c.HWAccel, c.H264Encoder, c.GPUDevice)
+}
+
+// grab runs ffmpeg to capture one frame as JPEG. At most
+// snapshot_concurrency grabs run at once. Large (main) H.265 frames are
+// decoded on the GPU when one is available.
+func (m *Manager) grab(rtspURL string, main bool, codec string) ([]byte, error) {
 	if rtspURL == "" {
 		return nil, errors.New("no stream url")
 	}
+	m.sem <- struct{}{}
+	defer func() { <-m.sem }()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-rtsp_transport", "tcp", "-timeout", "8000000", "-i", rtspURL, "-frames:v", "1", "-an"}
+	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin"}
+	if main && codec == protocol.CodecH265 {
+		args = append(args, m.Pipeline().DecodeInputArgs()...)
+	}
+	limit := main
+	args = append(args, "-rtsp_transport", "tcp", "-timeout", "8000000", "-i", rtspURL, "-frames:v", "1", "-an")
 	if limit {
 		args = append(args, "-vf", "scale='min(1920,iw)':-2")
 	}

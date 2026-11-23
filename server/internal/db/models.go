@@ -444,10 +444,14 @@ func (d *DB) SyncCameras(clientID int64, list []protocol.CameraInfo) (map[string
 	return ids, tx.Commit()
 }
 
-// SetCameraOnline updates a camera online flag.
-func (d *DB) SetCameraOnline(clientID int64, camUID string, online bool) error {
-	_, err := d.Exec(`UPDATE cameras SET online=? WHERE client_id=? AND cam_uid=?`, boolInt(online), clientID, camUID)
-	return err
+// SetCameraOnline updates a camera online flag and returns the camera id.
+func (d *DB) SetCameraOnline(clientID int64, camUID string, online bool) (int64, error) {
+	var id int64
+	err := d.QueryRow(`UPDATE cameras SET online=? WHERE client_id=? AND cam_uid=? RETURNING id`, boolInt(online), clientID, camUID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return id, err
 }
 
 // SetClientCamerasOffline marks every camera of a client offline.

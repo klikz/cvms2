@@ -13,25 +13,27 @@ import (
 	"cvms/shared/media"
 )
 
-// transcoder converts an H.265 Annex-B stream into H.264 with ffmpeg.
+// transcoder converts an H.265 Annex-B stream into H.264 with ffmpeg,
+// on the GPU when the pipeline has one.
 type transcoder struct {
 	cancel context.CancelFunc
 	in     chan []byte
 	once   sync.Once
+	gotKey bool // only touched by the writer of Write
 }
 
 // newTranscoder starts ffmpeg. out is called for every H.264 access unit.
-func newTranscoder(ffmpeg, encoder string, out func(media.AU)) (*transcoder, error) {
+func newTranscoder(ffmpeg string, pipe ffmpegx.Pipeline, out func(media.AU)) (*transcoder, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin"}
-	args = append(args, ffmpegx.InputArgs(encoder)...)
+	args = append(args, pipe.TranscodeInputArgs()...)
 	args = append(args,
 		"-fflags", "nobuffer", "-flags", "low_delay",
 		"-probesize", "1000000", "-analyzeduration", "0",
 		"-use_wallclock_as_timestamps", "1",
 		"-f", "hevc", "-i", "pipe:0",
 		"-an", "-fps_mode", "passthrough")
-	args = append(args, ffmpegx.EncoderArgs(encoder)...)
+	args = append(args, pipe.EncodeArgs()...)
 	args = append(args, "-f", "h264", "pipe:1")
 	cmd := exec.CommandContext(ctx, ffmpeg, args...)
 	hideWindow(cmd)
@@ -52,7 +54,6 @@ func newTranscoder(ffmpeg, encoder string, out func(media.AU)) (*transcoder, err
 		return nil, err
 	}
 	t := &transcoder{cancel: cancel, in: make(chan []byte, 120)}
-	// writer
 	go func() {
 		w := bufio.NewWriterSize(stdin, 256*1024)
 		for {
@@ -74,7 +75,6 @@ func newTranscoder(ffmpeg, encoder string, out func(media.AU)) (*transcoder, err
 			}
 		}
 	}()
-	// reader
 	go func() {
 		r := media.NewAUReader(stdout, "h264")
 		for {
@@ -86,15 +86,22 @@ func newTranscoder(ffmpeg, encoder string, out func(media.AU)) (*transcoder, err
 		}
 		_ = cmd.Wait()
 		if s := strings.TrimSpace(stderr.String()); s != "" && ctx.Err() == nil {
-			log.Printf("transcoder: %s", s)
+			log.Printf("transcoder (%s): %s", pipe.Name, s)
 		}
 		cancel()
 	}()
 	return t, nil
 }
 
-// Write queues an H.265 access unit; it drops data if ffmpeg falls behind.
-func (t *transcoder) Write(au media.AU) {
+// Write queues an H.265 access unit, starting at the first keyframe. It
+// drops data if ffmpeg falls behind. Must be called from one goroutine.
+func (t *transcoder) Write(au media.AU, key bool) {
+	if !t.gotKey {
+		if !key {
+			return
+		}
+		t.gotKey = true
+	}
 	select {
 	case t.in <- media.JoinAnnexB(au):
 	default:

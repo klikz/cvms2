@@ -166,8 +166,8 @@
       box.append(el("div", { class: "stats" },
         stat("camera", "ok", online + " / " + S.cams.length, t("dash.cameras_online")),
         stat(st.icon, st.cls, t(st.key), t("dash.server_status")),
-        stat("activity", "", String((s.server && s.server.streams) || 0), t("dash.streams")),
-        stat("image", "", (s.snapshot_interval || 5) + "s", t("dash.snapshot_interval"))));
+        stat("activity", "", String((s.server && s.server.streams) || 0) + ((s.server && s.server.transcodes) ? " · " + t("dash.transcodes", { n: s.server.transcodes }) : ""), t("dash.streams")),
+        stat("monitor", s.pipeline && s.pipeline.hwaccel ? "ok" : "warn", s.pipeline ? (s.pipeline.hwaccel ? "GPU" : "CPU") : "—", s.pipeline ? s.pipeline.name : t("dash.pipeline"))));
       box.append(el("div", { class: "card" },
         el("div", { class: "card-head" }, el("div", null, el("h3", { class: "card-title" }, t("dash.about")), el("p", { class: "card-sub" }, t("dash.about_sub")))),
         el("div", { class: "card-body" }, el("dl", { class: "kv" },
@@ -196,6 +196,11 @@
     let alive = true;
     let paused = document.hidden;
     let viewer = null;
+    // only tiles on screen refresh their snapshot
+    const visible = new Set();
+    const io = "IntersectionObserver" in window ? new IntersectionObserver((entries) => {
+      entries.forEach((e) => { if (e.isIntersecting) visible.add(e.target); else visible.delete(e.target); });
+    }, { rootMargin: "100px" }) : null;
 
     function renderToolbar() {
       CVMS.clear(toolbar);
@@ -217,7 +222,7 @@
       const interval = () => ((S.status && S.status.snapshot_interval) || 5) * 1000;
       const next = () => {
         if (!alive || loops.get(cam.id) !== l) return;
-        if (paused || viewer) { l.timer = setTimeout(next, 1000); return; }
+        if (paused || viewer || (io && !visible.has(tile))) { l.timer = setTimeout(next, 1000); return; }
         tile.classList.add("busy");
         const im = new Image();
         im.onload = () => { tile.classList.remove("busy", "offline"); img.src = im.src; img.style.visibility = "visible"; setStateText(tile, null); l.timer = setTimeout(next, interval()); };
@@ -237,6 +242,8 @@
     function render() {
       renderToolbar();
       stopLoops();
+      if (io) io.disconnect();
+      visible.clear();
       CVMS.clear(area);
       const cams = S.cams.filter((k) => k.enabled);
       if (!cams.length) {
@@ -255,6 +262,7 @@
           el("div", { class: "tile-state" }, el("div", null, el("div", { class: "spinner" }))),
           el("div", { class: "tile-bar" }, el("span", { class: "dot " + (cam.online ? "ok" : "off") }), el("span", { class: "tile-name" }, cam.name), badges));
         grid.append(tile);
+        if (io) io.observe(tile);
         loop(cam, img, tile);
       });
       area.append(grid);
@@ -302,7 +310,7 @@
       const n = S.cams.map((k) => k.id + k.enabled + k.online).join();
       if (n !== sig) { sig = n; render(); }
     };
-    S.cleanup = () => { alive = false; stopLoops(); document.removeEventListener("visibilitychange", onVis); if (viewer) viewer.close(); };
+    S.cleanup = () => { alive = false; stopLoops(); if (io) io.disconnect(); document.removeEventListener("visibilitychange", onVis); if (viewer) viewer.close(); };
     render();
   }
 
@@ -360,40 +368,163 @@
   }
 
   /* ================================================================ add / edit camera */
+  /* Add page: one table of found devices (ONVIF discovery + IP range scan),
+   * shared login/password, IP filter and bulk add via checkboxes. */
+  const A = (S.add = S.add || { rows: new Map(), user: "admin", pass: "", q: "", range: "", port: 80, discovered: false });
+  function ipKey(ip) { return ip.split(".").map((x) => x.padStart(3, "0")).join("."); }
+  // rows are keyed by ip:port — one IP may host several devices (NVR, encoder)
+  function rowKey(ip, port) { return ip + ":" + (port || 80); }
+  function addRow(d) {
+    const key = rowKey(d.ip, d.port);
+    const cur = A.rows.get(key) || { ip: d.ip, port: 80, name: "", onvif: false, rtsp: false, added: false, status: "new", error: "", selected: false };
+    Object.keys(d).forEach((k) => { if (d[k] !== undefined && d[k] !== "" && d[k] !== null) cur[k] = d[k]; });
+    if (cur.added && cur.status === "new") cur.status = "added";
+    A.rows.set(key, cur);
+  }
+
   function addPage() {
     const c = page(t("nav.add_camera"), t("add.sub"));
-    const list = el("div", { class: "dev-list" });
-    const scanBtn = btn({ label: t("add.scan"), icon: "radar", kind: "primary", onClick: scan });
-    c.append(el("div", { class: "add-grid" },
-      el("div", { class: "card" },
-        el("div", { class: "card-head" }, el("div", null, el("h3", { class: "card-title" }, t("add.discover")), el("p", { class: "card-sub" }, t("add.discover_sub"))), scanBtn),
-        el("div", { class: "card-body" }, list)),
-      el("div", { class: "card" },
-        el("div", { class: "card-head" }, el("div", null, el("h3", { class: "card-title" }, t("add.manual")), el("p", { class: "card-sub" }, t("add.manual_sub")))),
-        el("div", { class: "card-body" },
-          el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap" } },
-            btn({ label: t("add.by_onvif"), icon: "radar", onClick: () => cameraEditor(null, { mode: "onvif" }) }),
-            btn({ label: t("add.by_rtsp"), icon: "link", onClick: () => cameraEditor(null, { mode: "rtsp" }) })),
-          el("p", { class: "muted", style: { fontSize: "12px", margin: "14px 0 0" } }, t("add.manual_hint"))))));
-    list.append(el("p", { class: "muted", style: { margin: 0 } }, t("add.scan_hint")));
+    CVMS.shell.setActions(btn({ label: t("add.by_rtsp"), icon: "link", onClick: () => cameraEditor(null, { mode: "rtsp" }) }));
+    const user = el("input", { class: "input", value: A.user, autocomplete: "off", placeholder: t("auth.username") });
+    const pass = el("input", { class: "input", type: "password", value: A.pass, autocomplete: "new-password", placeholder: t("auth.password") });
+    user.oninput = () => { A.user = user.value; };
+    pass.oninput = () => { A.pass = pass.value; };
+    const q = el("input", { class: "input", value: A.q, placeholder: t("add.filter_ph") });
+    const range = el("input", { class: "input mono", value: A.range, placeholder: "192.168.1.10-50", title: t("add.range_hint"), style: { width: "210px" } });
+    const port = el("input", { class: "input", type: "number", value: A.port, min: "1", max: "65535", style: { width: "84px" }, title: t("add.onvif_port") });
+    range.oninput = () => { A.range = range.value; };
+    port.oninput = () => { A.port = +port.value || 80; };
+    q.oninput = () => { A.q = q.value.trim(); renderTable(); };
+    const discoverBtn = btn({ label: t("add.scan"), icon: "radar", onClick: discover });
+    const scanBtn = btn({ label: t("add.scan_range"), icon: "search", onClick: scanRange });
+    range.addEventListener("keydown", (e) => { if (e.key === "Enter") scanRange(); });
+    const statusLine = el("div", { class: "muted", style: { fontSize: "12px", minHeight: "18px" } });
+    const tableBox = el("div");
+    const addBtn = btn({ label: t("add.add_selected", { n: 0 }), icon: "plus", kind: "primary", onClick: bulkAdd });
+    const selInfo = el("span", { class: "muted", style: { fontSize: "12px" } });
 
-    async function scan() {
-      scanBtn.disabled = true;
-      CVMS.clear(list).append(el("div", { class: "row muted" }, el("div", { class: "spinner" }), t("add.scanning")));
+    c.append(
+      el("div", { class: "card" },
+        el("div", { class: "card-head" }, el("div", null, el("h3", { class: "card-title" }, t("add.creds")), el("p", { class: "card-sub" }, t("add.creds_sub")))),
+        el("div", { class: "card-body" }, el("div", { class: "form-row", style: { maxWidth: "640px" } }, CVMS.field(t("auth.username"), user), CVMS.field(t("auth.password"), pass)))),
+      el("div", { class: "card" },
+        el("div", { class: "card-head" }, el("div", null, el("h3", { class: "card-title" }, t("add.devices")), el("p", { class: "card-sub" }, t("add.devices_sub")))),
+        el("div", { class: "card-body", style: { paddingBottom: "8px" } },
+          el("div", { class: "toolbar" },
+            el("div", { class: "input-search", style: { width: "220px" } }, icon("search"), q),
+            el("div", { class: "spacer" }),
+            range, port, scanBtn, discoverBtn),
+          statusLine),
+        tableBox,
+        el("div", { class: "card-body row", style: { justifyContent: "space-between", borderTop: "1px solid var(--border)" } }, selInfo, addBtn)));
+
+    function selectable(r) { return r.onvif && !r.added && r.status !== "adding"; }
+    function visibleRows() {
+      const needle = A.q.toLowerCase();
+      return [...A.rows.values()]
+        .filter((r) => !needle || r.ip.includes(needle) || (r.name || "").toLowerCase().includes(needle) || (r.hardware || "").toLowerCase().includes(needle))
+        .sort((a, b) => (ipKey(a.ip) === ipKey(b.ip) ? a.port - b.port : ipKey(a.ip) < ipKey(b.ip) ? -1 : 1));
+    }
+    function statusBadge(r) {
+      switch (r.status) {
+        case "adding": return el("span", { class: "row", style: { gap: "6px" } }, el("div", { class: "spinner", style: { width: "14px", height: "14px" } }), t("add.st_adding"));
+        case "ok": return el("span", { class: "badge badge-ok badge-dot", title: r.warning || "" }, t("add.st_ok"));
+        case "added": return el("span", { class: "badge badge-dot" }, t("add.added"));
+        case "error": return el("span", { class: "badge badge-danger badge-dot", title: r.error }, r.code === "onvif_auth" ? t("add.st_auth") : t("add.failed"));
+        default: return r.onvif ? el("span", { class: "badge badge-accent" }, t("add.st_new")) : el("span", { class: "badge badge-warn", title: t("add.rtsp_only_hint") }, t("add.st_rtsp_only"));
+      }
+    }
+    function updateSel() {
+      const n = [...A.rows.values()].filter((r) => r.selected && selectable(r)).length;
+      addBtn.lastChild.textContent = t("add.add_selected", { n });
+      addBtn.disabled = n === 0;
+      selInfo.textContent = t("add.summary", { total: A.rows.size, added: [...A.rows.values()].filter((r) => r.added).length });
+    }
+    function renderTable() {
+      CVMS.clear(tableBox);
+      const rows = visibleRows();
+      if (!rows.length) {
+        tableBox.append(CVMS.emptyState("radar", A.rows.size ? t("add.no_match") : t("add.none_yet"), A.rows.size ? "" : t("add.none_yet_hint")));
+        updateSel();
+        return;
+      }
+      const sel = rows.filter(selectable);
+      const all = el("input", { type: "checkbox", checked: sel.length > 0 && sel.every((r) => r.selected), disabled: !sel.length });
+      all.onchange = () => { sel.forEach((r) => (r.selected = all.checked)); renderTable(); };
+      tableBox.append(el("div", { class: "table-wrap" }, el("table", { class: "table" },
+        el("thead", null, el("tr", null, el("th", { style: { width: "36px" } }, el("label", { class: "check" }, all)), el("th", null, "IP"), el("th", null, t("add.port")), el("th", null, t("add.device")), el("th", null, t("add.protocols")), el("th", null, t("col.status")), el("th"))),
+        el("tbody", null, rows.map((r) => {
+          const cb = el("input", { type: "checkbox", checked: r.selected && selectable(r), disabled: !selectable(r) });
+          cb.onchange = () => { r.selected = cb.checked; renderTable(); };
+          return el("tr", null,
+            el("td", null, el("label", { class: "check" }, cb)),
+            el("td", { class: "mono" }, r.ip),
+            el("td", { class: "mono muted" }, String(r.port)),
+            el("td", null, el("div", null, r.name || el("span", { class: "dim" }, "—")), r.hardware ? el("div", { class: "dim", style: { fontSize: "11px" } }, r.hardware) : null,
+              r.status === "error" && r.error ? el("div", { style: { fontSize: "11px", color: "var(--danger)" } }, r.error) : null),
+            el("td", null, el("div", { class: "row", style: { gap: "4px" } }, r.onvif ? el("span", { class: "badge badge-info" }, "ONVIF") : null, r.rtsp ? el("span", { class: "badge" }, "RTSP") : null)),
+            el("td", null, statusBadge(r)),
+            el("td", { class: "actions" }, r.added ? null : btn({
+              icon: "edit", size: "sm", title: t("add.configure"),
+              onClick: () => cameraEditor(null, r.onvif ? { mode: "onvif", host: r.ip, port: r.port, name: r.name, user: A.user, pass: A.pass } : { mode: "rtsp", host: r.ip, user: A.user, pass: A.pass }),
+            })));
+        })))));
+      updateSel();
+    }
+
+    async function discover() {
+      discoverBtn.disabled = true;
+      statusLine.textContent = t("add.scanning");
       try {
         const devs = await api("/api/discover", { method: "POST" });
-        CVMS.clear(list);
-        if (!devs.length) { list.append(el("p", { class: "muted", style: { margin: 0 } }, t("add.none_found"))); return; }
-        devs.forEach((d) => list.append(el("div", { class: "dev" },
-          icon("camera"),
-          el("div", { class: "grow" }, el("b", null, d.name || d.hardware || d.ip), el("span", { class: "mono" }, d.ip + ":" + d.port + (d.hardware ? " · " + d.hardware : ""))),
-          d.added ? el("span", { class: "badge badge-ok" }, t("add.added")) : btn({ label: t("common.add"), icon: "plus", size: "sm", kind: "primary", onClick: () => cameraEditor(null, { mode: "onvif", host: d.ip, port: d.port, name: d.name }) }))));
-        list.querySelectorAll(".dev > svg").forEach((s) => { s.style.cssText = "width:18px;height:18px;color:var(--text-3)"; });
-      } catch (e) {
-        CVMS.clear(list).append(notice("danger", "alert", e.message));
-      } finally { scanBtn.disabled = false; }
+        devs.forEach((d) => addRow({ ip: d.ip, port: d.port, name: d.name, hardware: d.hardware, onvif: true, added: d.added }));
+        statusLine.textContent = t("add.found", { n: devs.length });
+        A.discovered = true;
+      } catch (e) { statusLine.textContent = e.message; }
+      finally { discoverBtn.disabled = false; renderTable(); }
     }
-    S.afterSave = () => CVMS.router.go("/cameras");
+
+    async function scanRange() {
+      if (!A.range.trim()) { range.focus(); return; }
+      scanBtn.disabled = true;
+      statusLine.textContent = t("add.scanning_range", { r: A.range.trim() });
+      try {
+        const hits = await api("/api/scan", { method: "POST", body: { range: A.range.trim(), port: A.port } });
+        hits.forEach((h) => addRow({ ip: h.ip, port: h.port, onvif: h.onvif, rtsp: h.rtsp, added: h.added }));
+        statusLine.textContent = t("add.found", { n: hits.length });
+      } catch (e) { statusLine.textContent = e.message; }
+      finally { scanBtn.disabled = false; renderTable(); }
+    }
+
+    async function bulkAdd() {
+      const targets = [...A.rows.values()].filter((r) => r.selected && selectable(r));
+      if (!targets.length) return;
+      if (!A.user) { user.focus(); CVMS.toast(t("add.need_creds"), "warn"); return; }
+      targets.forEach((r) => { r.status = "adding"; r.error = ""; });
+      renderTable();
+      addBtn.disabled = true;
+      try {
+        const res = await api("/api/cameras/bulk", { method: "POST", body: { username: A.user, password: A.pass, devices: targets.map((r) => ({ host: r.ip, port: r.port, name: r.name })) } });
+        res.results.forEach((x) => {
+          const r = A.rows.get(rowKey(x.host, x.port));
+          if (!r) return;
+          r.selected = false;
+          if (x.ok) { r.status = "ok"; r.added = true; r.name = x.name || r.name; r.warning = x.warning; }
+          else if (x.code === "camera_exists") { r.status = "added"; r.added = true; }
+          else { r.status = "error"; r.error = x.error; r.code = x.code; }
+        });
+        CVMS.toast(t("add.bulk_done", { n: res.added, total: targets.length }), res.added === targets.length ? "ok" : "warn");
+        await loadCameras();
+      } catch (e) {
+        targets.forEach((r) => { if (r.status === "adding") { r.status = "error"; r.error = e.message; } });
+        CVMS.err(e);
+      }
+      renderTable();
+    }
+
+    S.afterSave = () => { loadCameras().then(() => { const keys = new Set(S.cams.filter((k) => k.onvif_port).map((k) => k.host + ":" + k.onvif_port)); A.rows.forEach((r) => { if (keys.has(r.ip + ":" + r.port)) { r.added = true; if (r.status !== "ok") r.status = "added"; } }); renderTable(); }); };
+    renderTable();
+    if (!A.discovered) discover();
   }
 
   /* cam: existing camera or null. opts: {mode: onvif|rtsp, host, port, name} */
@@ -405,9 +536,9 @@
       name: el("input", { class: "input", value: cam ? cam.name : opts.name || "", maxlength: "100" }),
       host: el("input", { class: "input", value: cam ? cam.host : opts.host || "", placeholder: "192.168.1.64" }),
       port: el("input", { class: "input", type: "number", value: cam ? cam.onvif_port || 80 : opts.port || 80, min: "1", max: "65535" }),
-      user: el("input", { class: "input", value: cam ? cam.username : "admin", autocomplete: "off" }),
-      pass: el("input", { class: "input", type: "password", autocomplete: "new-password", placeholder: cam && cam.has_password ? t("add.pw_keep") : "" }),
-      main: el("input", { class: "input mono", value: cam ? cam.main.url : "", placeholder: "rtsp://192.168.1.64:554/Streaming/Channels/101" }),
+      user: el("input", { class: "input", value: cam ? cam.username : opts.user !== undefined ? opts.user : "admin", autocomplete: "off" }),
+      pass: el("input", { class: "input", type: "password", value: cam ? "" : opts.pass || "", autocomplete: "new-password", placeholder: cam && cam.has_password ? t("add.pw_keep") : "" }),
+      main: el("input", { class: "input mono", value: cam ? cam.main.url : "", placeholder: "rtsp://" + (opts.host || "192.168.1.64") + ":554/Streaming/Channels/101" }),
       sub: el("input", { class: "input mono", value: cam ? cam.sub.url : "", placeholder: "rtsp://192.168.1.64:554/Streaming/Channels/102" }),
     };
     const meta = { manufacturer: cam ? cam.manufacturer : "", model: cam ? cam.model : "" };
@@ -457,7 +588,8 @@
         const selSub = el("select", { class: "select" }, el("option", { value: "" }, t("add.no_sub")), r.info.profiles.map(opt));
         selMain.value = r.main.uri || "";
         selSub.value = (r.sub && r.sub.uri) || "";
-        const apply = () => { f.main.value = selMain.value; f.sub.value = selSub.value; };
+        const snapOf = (uri) => { const p = r.info.profiles.find((x) => x.uri === uri); return p ? p.snapshot_uri || "" : ""; };
+        const apply = () => { f.main.value = selMain.value; f.sub.value = selSub.value; meta.mainSnap = snapOf(selMain.value); meta.subSnap = snapOf(selSub.value); };
         selMain.onchange = apply; selSub.onchange = apply; apply();
         CVMS.clear(profileBox).append(el("div", { class: "profile-box" },
           el("div", { class: "row", style: { marginBottom: "10px" } }, el("span", { class: "badge badge-ok" }, icon("check"), t("add.connected")), el("b", null, [r.info.manufacturer, r.info.model].filter(Boolean).join(" ")), r.info.firmware ? el("span", { class: "dim", style: { fontSize: "11px" } }, "fw " + r.info.firmware) : null),
@@ -503,6 +635,7 @@
             name: f.name.value.trim(), host: mode === "onvif" ? f.host.value.trim() : (cam ? cam.host : ""), onvif_port: +f.port.value || 0,
             username: f.user.value.trim(), password: f.pass.value === "" && cam && cam.has_password ? null : f.pass.value,
             manufacturer: meta.manufacturer, model: meta.model, main_url: f.main.value.trim(), sub_url: f.sub.value.trim(),
+            main_snapshot: meta.mainSnap || "", sub_snapshot: meta.subSnap || "",
           };
           if (cam) body.enabled = cam.enabled;
           const r = await api(isNew ? "/api/cameras" : "/api/cameras/" + cam.id, { method: isNew ? "POST" : "PUT", body });
@@ -572,7 +705,9 @@
       name: el("input", { class: "input", value: s.name, maxlength: "100" }),
       snap: el("input", { class: "input", type: "number", min: "1", max: "3600", value: s.snapshot_interval }),
       status: el("input", { class: "input", type: "number", min: "5", max: "3600", value: s.status_interval }),
-      mode: el("select", { class: "select" }, ["server", "client"].map((m) => el("option", { value: m, selected: s.transcode_mode === m }, t("settings.transcode_" + m)))),
+      hw: el("select", { class: "select" }, ["auto", "cuda", "qsv", "vaapi", "d3d11va", "none"].map((m) => el("option", { value: m, selected: s.hwaccel === m }, t("settings.hw_" + m)))),
+      gpu: el("input", { class: "input mono", value: s.gpu_device || "", placeholder: t("settings.gpu_device_ph") }),
+      conc: el("input", { class: "input", type: "number", min: "1", max: "64", value: s.snapshot_concurrency }),
       enc: el("select", { class: "select" }, ["auto", "libx264", "h264_nvenc", "h264_qsv", "h264_vaapi", "h264_amf"].map((m) => el("option", { value: m, selected: s.h264_encoder === m }, m === "auto" ? t("settings.encoder_auto") : m))),
       ffmpeg: el("input", { class: "input mono", value: s.ffmpeg_path, placeholder: t("settings.ffmpeg_ph") }),
       listen: el("input", { class: "input mono", value: s.ui_listen }),
@@ -590,7 +725,9 @@
       el("div", { class: "card" },
         el("div", { class: "card-head" }, el("div", null, el("h3", { class: "card-title" }, t("settings.video")), el("p", { class: "card-sub" }, t("settings.video_sub")))),
         el("div", { class: "card-body" },
-          el("div", { class: "form-row" }, CVMS.field(t("settings.transcode"), f.mode, t("settings.transcode_hint")), CVMS.field(t("settings.encoder"), f.enc)),
+          S.status && S.status.pipeline ? notice(S.status.pipeline.hwaccel ? "info" : "", "monitor", t("settings.pipeline_now", { p: S.status.pipeline.name })) : null,
+          el("div", { class: "form-row" }, CVMS.field(t("settings.hwaccel"), f.hw, t("settings.hwaccel_hint")), CVMS.field(t("settings.encoder"), f.enc)),
+          el("div", { class: "form-row" }, CVMS.field(t("settings.gpu_device"), f.gpu, t("settings.gpu_device_hint")), CVMS.field(t("settings.snapshot_concurrency"), f.conc, t("settings.snapshot_concurrency_hint"))),
           CVMS.field(t("settings.ffmpeg"), f.ffmpeg, t("settings.ffmpeg_hint")))),
       el("div", { class: "card" },
         el("div", { class: "card-head" }, el("div", null, el("h3", { class: "card-title" }, t("settings.security")), el("p", { class: "card-sub" }, t("settings.security_sub")))),
@@ -603,7 +740,7 @@
       try {
         const body = Object.assign({}, s, {
           name: f.name.value.trim(), snapshot_interval: +f.snap.value, status_interval: +f.status.value,
-          transcode_mode: f.mode.value, h264_encoder: f.enc.value, ffmpeg_path: f.ffmpeg.value.trim(),
+          hwaccel: f.hw.value, gpu_device: f.gpu.value.trim(), snapshot_concurrency: +f.conc.value, h264_encoder: f.enc.value, ffmpeg_path: f.ffmpeg.value.trim(),
           ui_listen: f.listen.value.trim(), session_idle_minutes: +f.idle.value,
         });
         const r = await api("/api/settings", { method: "PUT", body });

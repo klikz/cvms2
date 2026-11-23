@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -91,6 +92,8 @@ func (s *Server) Handler() http.Handler {
 			r.Put("/cameras/{id}", s.handleCameraSave)
 			r.Delete("/cameras/{id}", s.handleCameraDelete)
 			r.Get("/cameras/{id}/snapshot", s.handleSnapshot)
+			r.Post("/cameras/bulk", s.handleBulk)
+			r.Post("/scan", s.handleScan)
 			r.Post("/discover", s.handleDiscover)
 			r.Post("/onvif/probe", s.handleONVIFProbe)
 			r.Post("/rtsp/probe", s.handleRTSPProbe)
@@ -278,25 +281,29 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"ffmpeg_path":       s.cams.FFmpeg(),
 		"config_path":       s.store.Path(),
 		"snapshot_interval": cfg.SnapshotInterval,
+		"pipeline":          s.cams.Pipeline(),
 	})
 }
 
 type settingsDTO struct {
-	Name             string `json:"name"`
-	ServerURL        string `json:"server_url"`
-	SnapshotInterval int    `json:"snapshot_interval"`
-	StatusInterval   int    `json:"status_interval"`
-	TranscodeMode    string `json:"transcode_mode"`
-	H264Encoder      string `json:"h264_encoder"`
-	FFmpegPath       string `json:"ffmpeg_path"`
-	UIListen         string `json:"ui_listen"`
-	SessionIdle      int    `json:"session_idle_minutes"`
+	Name                string `json:"name"`
+	ServerURL           string `json:"server_url"`
+	SnapshotInterval    int    `json:"snapshot_interval"`
+	StatusInterval      int    `json:"status_interval"`
+	SnapshotConcurrency int    `json:"snapshot_concurrency"`
+	HWAccel             string `json:"hwaccel"`
+	GPUDevice           string `json:"gpu_device"`
+	H264Encoder         string `json:"h264_encoder"`
+	FFmpegPath          string `json:"ffmpeg_path"`
+	UIListen            string `json:"ui_listen"`
+	SessionIdle         int    `json:"session_idle_minutes"`
 }
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	c := s.store.Get()
 	writeJSON(w, settingsDTO{Name: c.Name, ServerURL: c.ServerURL, SnapshotInterval: c.SnapshotInterval, StatusInterval: c.StatusInterval,
-		TranscodeMode: c.TranscodeMode, H264Encoder: c.H264Encoder, FFmpegPath: c.FFmpegPath, UIListen: c.UI.Listen, SessionIdle: c.UI.SessionIdleMinutes})
+		SnapshotConcurrency: c.SnapshotConcurrency, HWAccel: c.HWAccel, GPUDevice: c.GPUDevice,
+		H264Encoder: c.H264Encoder, FFmpegPath: c.FFmpegPath, UIListen: c.UI.Listen, SessionIdle: c.UI.SessionIdleMinutes})
 }
 
 func (s *Server) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
@@ -340,10 +347,25 @@ func (s *Server) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 		if d.StatusInterval >= 5 && d.StatusInterval <= 3600 {
 			c.StatusInterval = d.StatusInterval
 		}
-		if d.TranscodeMode == "client" || d.TranscodeMode == "server" {
-			c.TranscodeMode = d.TranscodeMode
+		switch d.HWAccel {
+		case "auto", "cuda", "qsv", "vaapi", "d3d11va", "none":
+			if c.HWAccel != d.HWAccel {
+				restart = true
+			}
+			c.HWAccel = d.HWAccel
+		}
+		if strings.TrimSpace(d.GPUDevice) != c.GPUDevice {
+			c.GPUDevice = strings.TrimSpace(d.GPUDevice)
+			restart = true
+		}
+		if d.SnapshotConcurrency >= 1 && d.SnapshotConcurrency <= 64 && d.SnapshotConcurrency != c.SnapshotConcurrency {
+			c.SnapshotConcurrency = d.SnapshotConcurrency
+			restart = true
 		}
 		if d.H264Encoder != "" {
+			if d.H264Encoder != c.H264Encoder {
+				restart = true
+			}
 			c.H264Encoder = d.H264Encoder
 		}
 		c.FFmpegPath = strings.TrimSpace(d.FFmpegPath)
@@ -394,8 +416,19 @@ type cameraReq struct {
 	Model        string  `json:"model"`
 	MainURL      string  `json:"main_url"`
 	SubURL       string  `json:"sub_url"`
+	MainSnapshot string  `json:"main_snapshot"`
+	SubSnapshot  string  `json:"sub_snapshot"`
 	Enabled      *bool   `json:"enabled"`
 }
+
+// saveError carries an API error code.
+type saveError struct {
+	status int
+	code   string
+	msg    string
+}
+
+func (e *saveError) Error() string { return e.msg }
 
 func (s *Server) handleCameraSave(w http.ResponseWriter, r *http.Request) {
 	var req cameraReq
@@ -403,13 +436,28 @@ func (s *Server) handleCameraSave(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusBadRequest, "bad_request", "invalid request")
 		return
 	}
-	id := chi.URLParam(r, "id")
+	cam, probeErr, err := s.saveCamera(r.Context(), chi.URLParam(r, "id"), req)
+	if err != nil {
+		var se *saveError
+		if errors.As(err, &se) {
+			apiError(w, se.status, se.code, se.msg)
+			return
+		}
+		apiError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	s.tun.CamerasChanged()
+	writeJSON(w, map[string]any{"camera": cameraDTO{Camera: cam, HasPassword: cam.Password != ""}, "probe_error": probeErr})
+}
+
+// saveCamera validates, probes codecs and stores a camera (new when id is
+// empty). It is shared by single and bulk add.
+func (s *Server) saveCamera(ctx context.Context, id string, req cameraReq) (config.Camera, string, error) {
 	var existing config.Camera
 	if id != "" {
 		var ok bool
 		if existing, ok = s.store.Camera(id); !ok {
-			apiError(w, http.StatusNotFound, "not_found", "camera not found")
-			return
+			return config.Camera{}, "", &saveError{http.StatusNotFound, "not_found", "camera not found"}
 		}
 	}
 	cam := existing
@@ -433,18 +481,22 @@ func (s *Server) handleCameraSave(w http.ResponseWriter, r *http.Request) {
 		cam.Username, cam.Password = user, pass
 	}
 	if mainURL == "" {
-		apiError(w, http.StatusBadRequest, "main_url_required", "main stream URL is required")
-		return
+		return config.Camera{}, "", &saveError{http.StatusBadRequest, "main_url_required", "main stream URL is required"}
 	}
 	if !strings.HasPrefix(strings.ToLower(mainURL), "rtsp://") && !strings.HasPrefix(strings.ToLower(mainURL), "rtsps://") {
-		apiError(w, http.StatusBadRequest, "bad_rtsp_url", "stream URL must start with rtsp://")
-		return
+		return config.Camera{}, "", &saveError{http.StatusBadRequest, "bad_rtsp_url", "stream URL must start with rtsp://"}
 	}
 	if cam.Main.URL != mainURL {
 		cam.Main = config.Stream{URL: mainURL}
 	}
 	if cam.Sub.URL != subURL {
 		cam.Sub = config.Stream{URL: subURL}
+	}
+	if req.MainSnapshot != "" || cam.Main.SnapshotURL == "" {
+		cam.Main.SnapshotURL = strings.TrimSpace(req.MainSnapshot)
+	}
+	if req.SubSnapshot != "" || cam.Sub.SnapshotURL == "" {
+		cam.Sub.SnapshotURL = strings.TrimSpace(req.SubSnapshot)
 	}
 	if cam.Host == "" || req.Host != "" {
 		cam.Host = strings.TrimSpace(req.Host)
@@ -458,7 +510,7 @@ func (s *Server) handleCameraSave(w http.ResponseWriter, r *http.Request) {
 		cam.Name = cam.Host
 	}
 	// detect codecs (best effort, short timeout)
-	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
 	probeErr := ""
 	if cam.Main.Codec == "" {
@@ -496,16 +548,13 @@ func (s *Server) handleCameraSave(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if err.Error() == "duplicate" {
-			apiError(w, http.StatusConflict, "camera_exists", "this camera is already added")
-			return
+			return config.Camera{}, "", &saveError{http.StatusConflict, "camera_exists", "this camera is already added"}
 		}
-		apiError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
+		return config.Camera{}, "", err
 	}
 	s.cams.Forget(cam.ID)
 	s.cams.Kick()
-	s.tun.CamerasChanged()
-	writeJSON(w, map[string]any{"camera": cameraDTO{Camera: cam, HasPassword: cam.Password != ""}, "probe_error": probeErr})
+	return cam, probeErr, nil
 }
 
 // splitCreds removes user:pass@ from an RTSP URL and returns them.
@@ -576,17 +625,14 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusInternalServerError, "discover_failed", err.Error())
 		return
 	}
-	added := map[string]bool{}
-	for _, c := range s.store.Get().Cameras {
-		added[c.Host] = true
-	}
+	added := s.onvifAdded()
 	type devDTO struct {
 		onvif.Device
 		Added bool `json:"added"`
 	}
 	out := make([]devDTO, 0, len(devs))
 	for _, d := range devs {
-		out = append(out, devDTO{Device: d, Added: added[d.IP]})
+		out = append(out, devDTO{Device: d, Added: added[onvifKey(d.IP, d.Port)]})
 	}
 	writeJSON(w, out)
 }

@@ -9,6 +9,10 @@
   function preferMSE() { try { return sessionStorage.getItem(PREF_KEY) === "mse"; } catch (e) { return false; } }
   function setPreferMSE(v) { try { if (v) sessionStorage.setItem(PREF_KEY, "mse"); else sessionStorage.removeItem(PREF_KEY); } catch (e) { /* ignore */ } }
   const MS = window.MediaSource || window.ManagedMediaSource;
+  // remembers (per tab session) that this browser cannot decode H.265
+  const H265_KEY = "cvms.noh265";
+  function noH265() { try { return sessionStorage.getItem(H265_KEY) === "1"; } catch (e) { return false; } }
+  function setNoH265(v) { try { if (v) sessionStorage.setItem(H265_KEY, "1"); else sessionStorage.removeItem(H265_KEY); } catch (e) { /* ignore */ } }
 
   class Player {
     /* box: element (tile or viewer body). opts: {cameraId, profile, onState(state, info)} */
@@ -95,11 +99,18 @@
 
     watchFrames(gen) {
       clearTimeout(this.frameTimer);
+      const h265 = this.info && this.info.delivered === "h265";
       this.frameTimer = setTimeout(() => {
         if (gen !== this.gen || this.stopped) return;
+        if (h265) {
+          // the browser offered H.265 but cannot decode it: fall back to H.264
+          setNoH265(true);
+          this.retry(100);
+          return;
+        }
         this.setState("error", t("player.no_video"));
         this.retry(4000);
-      }, 25000);
+      }, h265 ? 12000 : 25000);
     }
 
     async connect(transport) {
@@ -133,9 +144,9 @@
       try {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-        const res = await CVMS.api("/api/cameras/" + this.opts.cameraId + "/webrtc?profile=" + this.opts.profile, { method: "POST", body: { sdp: offer.sdp } });
+        const res = await CVMS.api("/api/cameras/" + this.opts.cameraId + "/webrtc?profile=" + this.opts.profile + (noH265() ? "&codec=h264" : ""), { method: "POST", body: { sdp: offer.sdp } });
         if (gen !== this.gen) return;
-        this.info = { codec: res.codec, transcoded: res.transcoded };
+        this.info = { codec: res.codec, transcoded: res.transcoded, delivered: res.delivered };
         await pc.setRemoteDescription({ type: "answer", sdp: res.sdp });
       } catch (e) {
         if (gen !== this.gen) return;
@@ -154,7 +165,8 @@
     connectMSE(gen) {
       if (!MS) { this.setState("error", t("player.unsupported")); return; }
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
-      const ws = new WebSocket(proto + "//" + location.host + "/api/cameras/" + this.opts.cameraId + "/mse?profile=" + this.opts.profile);
+      const wantH265 = !noH265() && MS.isTypeSupported('video/mp4; codecs="hvc1.1.6.L93.B0"');
+      const ws = new WebSocket(proto + "//" + location.host + "/api/cameras/" + this.opts.cameraId + "/mse?profile=" + this.opts.profile + "&codec=" + (wantH265 ? "h265" : "h264"));
       ws.binaryType = "arraybuffer";
       this.ws = ws;
       this.queue = [];
@@ -165,7 +177,13 @@
         if (typeof ev.data === "string") {
           const meta = JSON.parse(ev.data);
           const mime = 'video/mp4; codecs="' + meta.codec + '"';
-          if (!MS.isTypeSupported(mime)) { this.setState("error", t("player.unsupported")); ws.close(); return; }
+          const isH265 = meta.codec.startsWith("hvc1") || meta.codec.startsWith("hev1");
+          this.info = { transport: "mse", delivered: isH265 ? "h265" : "h264", codec: isH265 ? "h265" : this.opts.codec, transcoded: !isH265 && this.opts.codec === "h265" };
+          if (!MS.isTypeSupported(mime)) {
+            if (isH265) { setNoH265(true); ws.onclose = null; ws.close(); this.retry(100, "mse"); return; }
+            this.setState("error", t("player.unsupported")); ws.close(); return;
+          }
+          this.watchFrames(gen);
           const ms = new MS();
           this.ms = ms;
           this.mseURL = URL.createObjectURL(ms);

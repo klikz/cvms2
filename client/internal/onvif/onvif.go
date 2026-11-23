@@ -328,6 +328,12 @@ func (c *Client) call(ctx context.Context, endpoint, body string, auth bool) (*n
 	return root, nil
 }
 
+// Ping checks that an ONVIF device service answers (no credentials needed).
+func (c *Client) Ping(ctx context.Context) bool {
+	root, err := c.call(ctx, c.DeviceURL, `<GetSystemDateAndTime xmlns="http://www.onvif.org/ver10/device/wsdl"/>`, false)
+	return err == nil && root.find("SystemDateAndTime") != nil
+}
+
 // syncTime adjusts the WS-Security timestamp to the device clock.
 func (c *Client) syncTime(ctx context.Context) {
 	root, err := c.call(ctx, c.DeviceURL, `<GetSystemDateAndTime xmlns="http://www.onvif.org/ver10/device/wsdl"/>`, false)
@@ -360,6 +366,8 @@ type Profile struct {
 	Width  int    `json:"width"`
 	Height int    `json:"height"`
 	URI    string `json:"uri"`
+	// SnapshotURI is an HTTP JPEG URL (cheaper than decoding RTSP).
+	SnapshotURI string `json:"snapshot_uri"`
 }
 
 // Info is the result of probing a device.
@@ -414,6 +422,12 @@ func (c *Client) Probe(ctx context.Context) (*Info, error) {
 		body := `<GetStreamUri xmlns="http://www.onvif.org/ver10/media/wsdl"><StreamSetup><Stream xmlns="http://www.onvif.org/ver10/schema">RTP-Unicast</Stream><Transport xmlns="http://www.onvif.org/ver10/schema"><Protocol>RTSP</Protocol></Transport></StreamSetup><ProfileToken>` + xmlEscape(pr.Token) + `</ProfileToken></GetStreamUri>`
 		if r, err := c.call(ctx, mediaURL, body, true); err == nil {
 			pr.URI = c.fixHost(r.text("MediaUri", "Uri"))
+		}
+		snapBody := `<GetSnapshotUri xmlns="http://www.onvif.org/ver10/media/wsdl"><ProfileToken>` + xmlEscape(pr.Token) + `</ProfileToken></GetSnapshotUri>`
+		if r, err := c.call(ctx, mediaURL, snapBody, true); err == nil {
+			if u := r.text("MediaUri", "Uri"); strings.HasPrefix(strings.ToLower(u), "http") {
+				pr.SnapshotURI = c.fixHost(u)
+			}
 		}
 		if pr.URI != "" {
 			info.Profiles = append(info.Profiles, pr)

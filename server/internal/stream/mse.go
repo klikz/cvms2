@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h265"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4/seekablebuffer"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/mp4/codecs"
@@ -21,6 +22,30 @@ var mseUpgrader = websocket.Upgrader{
 	// same-origin is enforced by the session cookie (SameSite) and the
 	// Origin check below.
 	CheckOrigin: sameOrigin,
+}
+
+// hevcCodecString builds the RFC 6381 codec string, e.g. hvc1.1.6.L93.B0.
+func hevcCodecString(s *h265.SPS) string {
+	p := s.ProfileTierLevel
+	var flags uint32
+	for i, f := range p.GeneralProfileCompatibilityFlag {
+		if f {
+			flags |= 1 << uint(i) // bit order reversed as required by RFC 6381
+		}
+	}
+	tier := "L"
+	if p.GeneralTierFlag == 1 {
+		tier = "H"
+	}
+	space := ""
+	if p.GeneralProfileSpace > 0 {
+		space = string(rune('A' + p.GeneralProfileSpace - 1))
+	}
+	cons := "B0"
+	if !p.GeneralProgressiveSourceFlag {
+		cons = "0"
+	}
+	return fmt.Sprintf("hvc1.%s%d.%X.%s%d.%s", space, p.GeneralProfileIdc, flags, tier, p.GeneralLevelIdc, cons)
 }
 
 func sameOrigin(r *http.Request) bool {
@@ -109,23 +134,35 @@ func ServeMSE(w http.ResponseWriter, r *http.Request, h *hub.Hub, v *hub.Viewer,
 		case fr := <-v.Frames():
 			f := fr
 			if !inited {
-				if !f.Key || f.SPS == nil || f.PPS == nil {
+				if !f.Key || f.SPS == nil || f.PPS == nil || (f.Codec == "h265" && f.VPS == nil) {
 					continue
 				}
-				var s h264.SPS
-				if err := s.Unmarshal(f.SPS); err != nil {
-					continue
+				var codecStr string
+				var width, height int
+				var trackCodec codecs.Codec
+				if f.Codec == "h265" {
+					var s h265.SPS
+					if err := s.Unmarshal(f.SPS); err != nil {
+						continue
+					}
+					codecStr = hevcCodecString(&s)
+					width, height = s.Width(), s.Height()
+					trackCodec = &codecs.H265{VPS: f.VPS, SPS: f.SPS, PPS: f.PPS}
+				} else {
+					var s h264.SPS
+					if err := s.Unmarshal(f.SPS); err != nil {
+						continue
+					}
+					sps = f.SPS
+					codecStr = fmt.Sprintf("avc1.%02x%02x%02x", sps[1], sps[2], sps[3])
+					width, height = s.Width(), s.Height()
+					trackCodec = &codecs.H264{SPS: f.SPS, PPS: f.PPS}
 				}
-				sps = f.SPS
-				meta, _ := json.Marshal(map[string]any{
-					"codec":  fmt.Sprintf("avc1.%02x%02x%02x", sps[1], sps[2], sps[3]),
-					"width":  s.Width(),
-					"height": s.Height(),
-				})
+				meta, _ := json.Marshal(map[string]any{"codec": codecStr, "width": width, "height": height})
 				if write(websocket.TextMessage, meta) != nil {
 					return
 				}
-				init := fmp4.Init{Tracks: []*fmp4.InitTrack{{ID: 1, TimeScale: timescale, Codec: &codecs.H264{SPS: f.SPS, PPS: f.PPS}}}}
+				init := fmp4.Init{Tracks: []*fmp4.InitTrack{{ID: 1, TimeScale: timescale, Codec: trackCodec}}}
 				var buf seekablebuffer.Buffer
 				if err := init.Marshal(&buf); err != nil {
 					return

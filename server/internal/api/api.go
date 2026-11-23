@@ -34,11 +34,12 @@ type Server struct {
 	limiter *loginlimit.Limiter
 	web     fs.FS
 	version string
+	auditCh chan *db.AuditEntry
 }
 
 // New creates the API server.
 func New(cfg *config.Config, d *db.DB, h *hub.Hub, rtc *stream.WebRTC, web fs.FS, version string) *Server {
-	return &Server{
+	s := &Server{
 		cfg:     cfg,
 		db:      d,
 		hub:     h,
@@ -46,7 +47,10 @@ func New(cfg *config.Config, d *db.DB, h *hub.Hub, rtc *stream.WebRTC, web fs.FS
 		web:     web,
 		version: version,
 		limiter: loginlimit.New(cfg.LoginMaxAttempts, time.Duration(cfg.LoginBlockMinutes)*time.Minute, time.Duration(cfg.LoginBlockMinutes)*time.Minute),
+		auditCh: make(chan *db.AuditEntry, 4096),
 	}
+	go s.auditWriter()
+	return s
 }
 
 // Handler builds the router.
@@ -191,13 +195,25 @@ func (s *Server) clientIP(r *http.Request) string {
 	return host
 }
 
+// audit queues an audit entry; a background goroutine writes it so the
+// request path never waits on the database.
 func (s *Server) audit(u *db.User, ip, action, target, details string) {
-	e := &db.AuditEntry{IP: ip, Action: action, Target: target, Details: details}
+	e := &db.AuditEntry{TS: db.Now(), IP: ip, Action: action, Target: target, Details: details}
 	if u != nil {
 		e.UserID, e.Username = u.ID, u.Username
 	}
-	if err := s.db.AddAudit(e); err != nil {
-		log.Printf("audit: %v", err)
+	select {
+	case s.auditCh <- e:
+	default:
+		log.Printf("audit queue full, dropping %s %s", action, target)
+	}
+}
+
+func (s *Server) auditWriter() {
+	for e := range s.auditCh {
+		if err := s.db.AddAudit(e); err != nil {
+			log.Printf("audit: %v", err)
+		}
 	}
 }
 

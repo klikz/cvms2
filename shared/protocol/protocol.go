@@ -123,6 +123,9 @@ type StreamStart struct {
 	StreamID uint32 `json:"stream_id"`
 	CameraID string `json:"camera_id"`
 	Profile  string `json:"profile"`
+	// Codec is the requested output: "" (native, as the camera sends it)
+	// or "h264" (the client must transcode H.265 to H.264).
+	Codec string `json:"codec,omitempty"`
 }
 
 // StreamStop asks the client to stop pushing a stream.

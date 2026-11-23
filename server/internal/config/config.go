@@ -38,9 +38,18 @@ type Config struct {
 	ViewerIdleMinutes    int    `yaml:"viewer_idle_minutes"`
 	SnapshotCacheSeconds int    `yaml:"snapshot_cache_seconds"`
 	FFmpegPath           string `yaml:"ffmpeg_path"`
-	// H264Encoder for H.265 -> H.264 transcoding: auto | libx264 | h264_nvenc | h264_qsv | h264_vaapi ...
+	// HWAccel for the H.265 -> H.264 fallback: auto | cuda | qsv | vaapi | d3d11va | none.
+	HWAccel string `yaml:"hwaccel"`
+	// GPUDevice selects a GPU when there are several (index, or render node path for vaapi).
+	GPUDevice string `yaml:"gpu_device"`
+	// H264Encoder: auto (matches hwaccel) | libx264 | h264_nvenc | h264_qsv | h264_vaapi | h264_amf.
 	H264Encoder string `yaml:"h264_encoder"`
-	WebRTC      WebRTC `yaml:"webrtc"`
+	// H265Fallback: where H.265 is converted for browsers that cannot play
+	// H.265: server | client (the camera's client GPU does it).
+	H265Fallback string `yaml:"h265_fallback"`
+	WebRTC       WebRTC `yaml:"webrtc"`
+	// AuditViews: which camera views are logged: main | all | none.
+	AuditViews string `yaml:"audit_views"`
 
 	path string `yaml:"-"`
 }
@@ -54,10 +63,13 @@ func Default() *Config {
 		LoginMaxAttempts:     5,
 		LoginBlockMinutes:    15,
 		AuditRetentionDays:   90,
-		StreamIdleSeconds:    10,
+		StreamIdleSeconds:    30,
 		ViewerIdleMinutes:    15,
 		SnapshotCacheSeconds: 10,
+		HWAccel:              "auto",
 		H264Encoder:          "auto",
+		H265Fallback:         "server",
+		AuditViews:           "main",
 		WebRTC: WebRTC{
 			UDPPort:   8189,
 			TCPPort:   8189,
@@ -118,6 +130,17 @@ func (c *Config) fix() {
 	}
 	if c.H264Encoder == "" {
 		c.H264Encoder = d.H264Encoder
+	}
+	if c.HWAccel == "" {
+		c.HWAccel = d.HWAccel
+	}
+	if c.H265Fallback != "client" {
+		c.H265Fallback = "server"
+	}
+	switch c.AuditViews {
+	case "main", "all", "none":
+	default:
+		c.AuditViews = d.AuditViews
 	}
 }
 

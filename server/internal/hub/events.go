@@ -59,7 +59,7 @@ func (e *Events) PublishDebounced(typ string) {
 	if _, ok := e.pending[typ]; ok {
 		return
 	}
-	e.pending[typ] = time.AfterFunc(300*time.Millisecond, func() {
+	e.pending[typ] = time.AfterFunc(time.Second, func() {
 		e.debounceMu.Lock()
 		delete(e.pending, typ)
 		e.debounceMu.Unlock()

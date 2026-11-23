@@ -19,10 +19,12 @@ import (
 
 // Stream describes one RTSP stream of a camera.
 type Stream struct {
-	URL    string `yaml:"url" json:"url"`
-	Codec  string `yaml:"codec,omitempty" json:"codec"`
-	Width  int    `yaml:"width,omitempty" json:"width"`
-	Height int    `yaml:"height,omitempty" json:"height"`
+	URL string `yaml:"url" json:"url"`
+	// SnapshotURL is an optional HTTP JPEG URL (from ONVIF GetSnapshotUri).
+	SnapshotURL string `yaml:"snapshot_url,omitempty" json:"snapshot_url"`
+	Codec       string `yaml:"codec,omitempty" json:"codec"`
+	Width       int    `yaml:"width,omitempty" json:"width"`
+	Height      int    `yaml:"height,omitempty" json:"height"`
 }
 
 // Camera is one configured camera.
@@ -63,26 +65,31 @@ type Config struct {
 	// SnapshotInterval is the grid image refresh period in seconds.
 	SnapshotInterval int `yaml:"snapshot_interval"`
 	// StatusInterval is the camera online check period in seconds.
-	StatusInterval int    `yaml:"status_interval"`
-	FFmpegPath     string `yaml:"ffmpeg_path"`
-	// TranscodeMode for H.265 cameras: "server" (send H.265, server converts)
-	// or "client" (convert to H.264 here).
-	TranscodeMode string   `yaml:"transcode_mode"`
-	H264Encoder   string   `yaml:"h264_encoder"`
-	Cameras       []Camera `yaml:"cameras"`
+	StatusInterval int `yaml:"status_interval"`
+	// SnapshotConcurrency limits parallel snapshot ffmpeg processes.
+	SnapshotConcurrency int    `yaml:"snapshot_concurrency"`
+	FFmpegPath          string `yaml:"ffmpeg_path"`
+	// HWAccel for decoding and H.265 -> H.264 transcoding (when the server
+	// asks for H.264): auto | cuda | qsv | vaapi | d3d11va | none.
+	HWAccel string `yaml:"hwaccel"`
+	// GPUDevice selects a GPU when there are several.
+	GPUDevice   string   `yaml:"gpu_device"`
+	H264Encoder string   `yaml:"h264_encoder"`
+	Cameras     []Camera `yaml:"cameras"`
 }
 
 func defaults() *Config {
 	host, _ := os.Hostname()
 	return &Config{
-		Name:             host,
-		ClientUID:        randomID(16),
-		UI:               UI{Listen: "127.0.0.1:8081", Username: "admin", SessionIdleMinutes: 60, LoginMaxAttempts: 5, LoginBlockMinutes: 15},
-		SnapshotInterval: 5,
-		StatusInterval:   30,
-		TranscodeMode:    "server",
-		H264Encoder:      "auto",
-		Cameras:          []Camera{},
+		Name:                host,
+		ClientUID:           randomID(16),
+		UI:                  UI{Listen: "127.0.0.1:8081", Username: "admin", SessionIdleMinutes: 60, LoginMaxAttempts: 5, LoginBlockMinutes: 15},
+		SnapshotInterval:    5,
+		StatusInterval:      30,
+		SnapshotConcurrency: 4,
+		HWAccel:             "auto",
+		H264Encoder:         "auto",
+		Cameras:             []Camera{},
 	}
 }
 
@@ -149,8 +156,11 @@ func Load(path string, box *secret.Box) (s *Store, created bool, err error) {
 	if cfg.StatusInterval <= 0 {
 		cfg.StatusInterval = d.StatusInterval
 	}
-	if cfg.TranscodeMode != "client" {
-		cfg.TranscodeMode = "server"
+	if cfg.SnapshotConcurrency <= 0 {
+		cfg.SnapshotConcurrency = d.SnapshotConcurrency
+	}
+	if cfg.HWAccel == "" {
+		cfg.HWAccel = d.HWAccel
 	}
 	if cfg.H264Encoder == "" {
 		cfg.H264Encoder = d.H264Encoder

@@ -27,7 +27,15 @@ type WebRTC struct {
 	iceServer []webrtc.ICEServer
 }
 
-const h264Fmtp = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+const (
+	h264Fmtp = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+	h265Fmtp = "level-id=93;profile-id=1;tier-flag=0;tx-mode=SRST"
+)
+
+// OfferHasH265 reports whether a browser SDP offer can receive H.265.
+func OfferHasH265(offer string) bool {
+	return strings.Contains(strings.ToUpper(offer), "H265/90000")
+}
 
 // NewWebRTC sets up the shared WebRTC API (single UDP port, optional ICE-TCP).
 func NewWebRTC(cfg config.WebRTC) (*WebRTC, error) {
@@ -36,6 +44,13 @@ func NewWebRTC(cfg config.WebRTC) (*WebRTC, error) {
 		RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000, SDPFmtpLine: h264Fmtp,
 			RTCPFeedback: []webrtc.RTCPFeedback{{Type: "nack"}, {Type: "nack", Parameter: "pli"}, {Type: "ccm", Parameter: "fir"}}},
 		PayloadType: 102,
+	}, webrtc.RTPCodecTypeVideo); err != nil {
+		return nil, err
+	}
+	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH265, ClockRate: 90000, SDPFmtpLine: h265Fmtp,
+			RTCPFeedback: []webrtc.RTCPFeedback{{Type: "nack"}, {Type: "nack", Parameter: "pli"}, {Type: "ccm", Parameter: "fir"}}},
+		PayloadType: 104,
 	}, webrtc.RTPCodecTypeVideo); err != nil {
 		return nil, err
 	}
@@ -85,7 +100,11 @@ func (w *WebRTC) Answer(offer string, h *hub.Hub, v *hub.Viewer, onEnd func()) (
 	if err != nil {
 		return "", err
 	}
-	track, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000, SDPFmtpLine: h264Fmtp}, "video", "cvms")
+	capab := webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000, SDPFmtpLine: h264Fmtp}
+	if v.Codec == "h265" {
+		capab = webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH265, ClockRate: 90000, SDPFmtpLine: h265Fmtp}
+	}
+	track, err := webrtc.NewTrackLocalStaticSample(capab, "video", "cvms")
 	if err != nil {
 		pc.Close()
 		return "", err

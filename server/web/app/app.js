@@ -95,16 +95,42 @@
     }
   }
 
+  /* Live status patches: update in place instead of reloading everything. */
+  let navTimer = null;
+  function scheduleNav() {
+    if (navTimer) return;
+    navTimer = setTimeout(() => { navTimer = null; CVMS.shell.renderNav(); }, 1000);
+  }
+  function notifyStatus() { if (S.onStatus) S.onStatus(); }
+  function patchCamera(d) {
+    const cam = S.camByID.get(d.camera_id);
+    if (!cam) return;
+    if (cam.online === d.online) return;
+    cam.online = d.online && cam.client.online;
+    scheduleNav();
+    notifyStatus();
+  }
+  function patchClient(d) {
+    const c = S.clients.find((x) => x.id === d.client_id);
+    if (!c) { refreshData(); return; }
+    c.online = d.online;
+    c.last_seen = d.last_seen;
+    if (!d.online) c.cameras.forEach((k) => { k.online = false; });
+    scheduleNav();
+    notifyStatus();
+  }
+
   function connectEvents() {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(proto + "//" + location.host + "/api/events");
     S.ws = ws;
     ws.onopen = () => CVMS.shell.setConn("ok", t("conn.live"));
     ws.onmessage = (ev) => {
-      try {
-        const m = JSON.parse(ev.data);
-        if (m.type === "clients") refreshData();
-      } catch (e) { /* ignore */ }
+      let m;
+      try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (m.type === "clients") refreshData();
+      else if (m.type === "camera_status") patchCamera(m.data);
+      else if (m.type === "client_status") patchClient(m.data);
     };
     ws.onclose = () => {
       if (!S.me) return;
@@ -123,10 +149,18 @@
       ],
     }];
     const approved = S.clients.filter((c) => c.status === "approved");
+    const offlineOnly = CVMS.store.get("cvms.nav.offline") === "1";
+    const offline = approved.filter((c) => !c.online).length;
     sections.push({
       title: t("nav.clients"),
-      empty: t("nav.no_clients"),
-      items: approved.map((c) => ({ href: "#/client/" + c.id, dot: c.online ? "ok" : "off", label: c.name, count: c.cameras.length })),
+      key: "clients",
+      searchable: true,
+      badge: approved.length > 8 ? (offline ? offline + "/" : "") + approved.length : null,
+      empty: offlineOnly ? t("nav.no_offline") : t("nav.no_clients"),
+      actions: approved.length ? [{ icon: "wifioff", title: t("nav.offline_only"), active: offlineOnly, onClick: () => { CVMS.store.set("cvms.nav.offline", offlineOnly ? "0" : "1"); CVMS.shell.renderNav(); } }] : [],
+      items: approved
+        .filter((c) => !offlineOnly || !c.online)
+        .map((c) => ({ href: "#/client/" + c.id, dot: c.online ? "ok" : "off", label: c.name, count: c.cameras.length })),
     });
     if (S.me && S.me.role === "admin") {
       const pending = S.clients.filter((c) => c.status === "pending").length;
@@ -146,6 +180,7 @@
   function page(title, sub, flush) {
     if (S.cleanup) { S.cleanup(); S.cleanup = null; }
     S.refresh = null;
+    S.onStatus = null;
     CVMS.shell.setTitle(title, sub);
     CVMS.shell.setActions();
     return CVMS.shell.content(flush);
@@ -225,9 +260,19 @@
         stat("camera", "ok", info.cameras_online + " / " + info.cameras, t("dash.cameras_online")),
         S.me.role === "admin" ? stat("clock", info.pending ? "warn" : "", String(info.pending || 0), t("dash.pending")) : null,
         S.me.role === "admin" ? stat("users", "", String(info.users || 0), t("dash.users")) : null);
-      const approved = S.clients.filter((x) => x.status === "approved");
-      CVMS.clear(listBox).append(
-        el("div", { class: "card-head" }, el("div", null, el("h3", { class: "card-title" }, t("nav.clients")), el("p", { class: "card-sub" }, t("dash.clients_sub")))),
+      renderList();
+    }
+    const dl = { q: "", page: 1 };
+    function renderList() {
+      const all = S.clients.filter((x) => x.status === "approved");
+      const q = dl.q.toLowerCase();
+      const filtered = all.filter((x) => !q || x.name.toLowerCase().includes(q) || (x.hostname || "").toLowerCase().includes(q))
+        .sort((a, b) => (a.online === b.online ? a.name.localeCompare(b.name) : a.online ? 1 : -1)); // offline first
+      const pg = CVMS.paginate(filtered, dl.page, 25);
+      dl.page = pg.page;
+      const approved = pg.items;
+      search.style.display = all.length > 10 ? "" : "none";
+      CVMS.clear(listBody).append(
         approved.length ? el("div", { class: "table-wrap", style: { marginTop: "8px" } }, el("table", { class: "table" },
           el("thead", null, el("tr", null, el("th", null, t("col.name")), el("th", null, t("col.status")), el("th", null, t("col.cameras")), el("th", null, t("col.last_seen")), el("th"))),
           el("tbody", null, approved.map((x) => {
@@ -238,9 +283,14 @@
               el("td", null, online + " / " + x.cameras.length),
               el("td", { class: "muted" }, x.online ? t("status.now") : fmt.ago(x.last_seen)),
               el("td", { class: "actions" }, btn({ label: t("common.open"), icon: "eye", size: "sm", onClick: () => CVMS.router.go("/client/" + x.id) })));
-          })))) : CVMS.emptyState("server", t("dash.no_clients"), S.me.role === "admin" ? t("dash.no_clients_admin") : t("dash.no_clients_user")));
+          })))) : CVMS.emptyState("server", all.length ? t("common.no_match") : t("dash.no_clients"), all.length ? "" : S.me.role === "admin" ? t("dash.no_clients_admin") : t("dash.no_clients_user")),
+        pg.pages > 1 ? el("div", { class: "card-body row", style: { justifyContent: "flex-end" } }, CVMS.pager(pg.page, pg.pages, (p) => { dl.page = p; renderList(); })) : null);
     }
+    const search = CVMS.searchBox("", (v) => { dl.q = v; dl.page = 1; renderList(); });
+    const listBody = el("div");
+    listBox.append(el("div", { class: "card-head" }, el("div", null, el("h3", { class: "card-title" }, t("nav.clients")), el("p", { class: "card-sub" }, t("dash.clients_sub"))), search), listBody);
     S.refresh = render;
+    S.onStatus = renderList;
     render();
   }
 
@@ -262,6 +312,7 @@
       size: layout ? layout.grid : +(CVMS.store.get("cvms.grid") || 2),
       page: 1,
       loc: "",
+      client: 0,
       q: "",
       order: layout ? layout.cameras.slice() : JSON.parse(CVMS.store.get(orderKey) || "[]"),
     };
@@ -272,6 +323,7 @@
     function allCams() {
       if (layout) return st.order.map((id) => S.camByID.get(id)).filter(Boolean);
       let list = client ? S.cams.filter((k) => k.client.id === client.id) : S.cams.slice();
+      if (st.client) list = list.filter((k) => k.client.id === st.client);
       if (st.loc) list = list.filter((k) => (k.location || "") === st.loc);
       if (st.q) { const q = st.q.toLowerCase(); list = list.filter((k) => k.name.toLowerCase().includes(q) || (k.location || "").toLowerCase().includes(q) || k.client.name.toLowerCase().includes(q)); }
       const pos = new Map(st.order.map((id, i) => [id, i]));
@@ -300,6 +352,15 @@
     function renderToolbar(list, pages) {
       CVMS.clear(toolbar);
       toolbar.append(sizeGroup());
+      if (!layout && !client) {
+        const withCams = S.clients.filter((x) => x.status === "approved" && x.cameras.length).sort((a, b) => a.name.localeCompare(b.name));
+        if (withCams.length > 1) {
+          const cs = el("select", { class: "select", style: { width: "auto", maxWidth: "200px", height: "26px", fontSize: "12px" } },
+            el("option", { value: "0" }, t("grid.all_clients")), withCams.map((x) => el("option", { value: x.id, selected: x.id === st.client }, x.name + " (" + x.cameras.length + ")")));
+          cs.onchange = () => { st.client = +cs.value; st.page = 1; render(true); };
+          toolbar.append(cs);
+        }
+      }
       if (!layout) {
         const locs = [...new Set((client ? S.cams.filter((k) => k.client.id === client.id) : S.cams).map((k) => k.location).filter(Boolean))].sort();
         if (locs.length) {
@@ -331,11 +392,26 @@
       const pages = Math.max(1, Math.ceil(list.length / per));
       if (st.page > pages) st.page = pages;
       const slice = list.slice((st.page - 1) * per, st.page * per);
-      const newSig = st.size + "|" + slice.map((k) => k.id + ":" + (k.online ? 1 : 0)).join(",");
-      renderToolbar(list, pages);
+      const newSig = st.size + "|" + slice.map((k) => k.id).join(",");
+      if (force || newSig !== sig || !toolbar.firstChild) renderToolbar(list, pages);
       if (!force && newSig === sig) {
-        // names/badges may have changed
-        slice.forEach((k) => { const n = area.querySelector('.tile[data-id="' + k.id + '"] .tile-name'); if (n) n.textContent = camLabel(k); });
+        // same cameras on the page: update names and rebuild only the tiles
+        // whose online state changed (other players keep running)
+        slice.forEach((k) => {
+          const old = area.querySelector('.tile[data-id="' + k.id + '"]');
+          if (!old) return;
+          if (old.dataset.online !== String(!!k.online)) {
+            const p = players.get(k.id);
+            if (p) { p.destroy(); players.delete(k.id); }
+            const nt = tile(k);
+            old.replaceWith(nt);
+            const np = players.get(k.id);
+            if (np && !Activity.paused && !viewer) np.start();
+          } else {
+            const n = old.querySelector(".tile-name");
+            if (n) n.textContent = camLabel(k);
+          }
+        });
         return;
       }
       sig = newSig;
@@ -358,7 +434,7 @@
     function tile(cam) {
       const badges = el("div", { class: "tile-badges" });
       const name = el("span", { class: "tile-name" }, camLabel(cam));
-      const n = el("div", { class: "tile" + (cam.online ? "" : " offline"), "data-id": cam.id, draggable: "true", title: cam.client.name + " · " + cam.name + "\n" + t("grid.dblclick") },
+      const n = el("div", { class: "tile" + (cam.online ? "" : " offline"), "data-id": cam.id, "data-online": String(!!cam.online), draggable: "true", title: cam.client.name + " · " + cam.name + "\n" + t("grid.dblclick") },
         el("div", { class: "tile-bar" }, el("span", { class: "dot " + (cam.online ? "ok" : "off") }), name, badges));
       if (cam.location) badges.append(el("span", { class: "badge loc" }, cam.location));
       const codec = cam.sub && cam.sub.available ? cam.sub.codec : cam.main.codec;
@@ -370,7 +446,7 @@
       n.addEventListener("dragleave", () => n.classList.remove("drag-over"));
       n.addEventListener("drop", (e) => { e.preventDefault(); n.classList.remove("drag-over"); if (dragID && dragID !== cam.id) swap(dragID, cam.id); dragID = null; });
       if (cam.online) {
-        players.set(cam.id, new CVMS.Player(n, { cameraId: cam.id, profile: "sub" }));
+        players.set(cam.id, new CVMS.Player(n, { cameraId: cam.id, profile: "sub", codec: codec }));
       } else {
         const img = el("img", { alt: "", src: "/api/cameras/" + cam.id + "/snapshot?profile=sub" });
         img.onerror = () => img.remove();
@@ -420,11 +496,11 @@
       document.body.appendChild(v);
       document.addEventListener("keydown", onKey);
       const p = new CVMS.Player(body, {
-        cameraId: cam.id, profile: "main",
+        cameraId: cam.id, profile: "main", codec: cam.main.codec,
         onState: (s, info) => {
           CVMS.clear(badges);
           if (cam.main.width) badges.append(el("span", { class: "badge" }, fmt.res(cam.main.width, cam.main.height)));
-          const cb = CVMS.codecBadge(info.codec || cam.main.codec, info.codec === "h265" || info.transcoded);
+          const cb = CVMS.codecBadge(info.codec || cam.main.codec, !!info.transcoded);
           if (cb) badges.append(cb);
           if (info.transport === "mse") badges.append(el("span", { class: "badge badge-warn" }, "WS"));
         },
@@ -483,6 +559,7 @@
       if (layout && !S.layouts.includes(layout)) return;
       render(false);
     };
+    S.onStatus = () => render(false);
     render(true);
   }
 
@@ -490,19 +567,46 @@
   function pickCameras(selected, onSave) {
     const chosen = new Set(selected);
     const groups = el("div");
+    const counter = el("span", { class: "muted", style: { fontSize: "12px" } });
     const approved = S.clients.filter((c) => c.status === "approved" && c.cameras.length);
-    if (!approved.length) groups.append(el("p", { class: "muted" }, t("grid.empty_text")));
-    approved.forEach((c) => {
-      groups.append(el("div", { class: "cam-pick-group" },
-        el("h4", null, el("span", { class: "dot " + (c.online ? "ok" : "off") }), c.name),
-        el("div", { class: "list-check" }, c.cameras.map((cam) => {
-          const cb = el("input", { type: "checkbox", checked: chosen.has(cam.id) });
-          cb.onchange = () => { if (cb.checked) chosen.add(cam.id); else chosen.delete(cam.id); };
-          return el("label", { class: "check" }, cb, cam.name, cam.location ? el("span", { class: "dim" }, " · " + cam.location) : null);
-        }))));
-    });
+    let q = "";
+    const collapsed = new Set(approved.length > 5 ? approved.map((c) => c.id) : []);
+    const count = () => { counter.textContent = t("layout.selected", { n: chosen.size }); };
+    function render() {
+      CVMS.clear(groups);
+      if (!approved.length) { groups.append(el("p", { class: "muted" }, t("grid.empty_text"))); return; }
+      const needle = q.toLowerCase();
+      let shown = 0;
+      approved.forEach((c) => {
+        const cams = c.cameras.filter((k) => !needle || k.name.toLowerCase().includes(needle) || (k.location || "").toLowerCase().includes(needle) || c.name.toLowerCase().includes(needle));
+        if (!cams.length) return;
+        shown++;
+        const open = needle || !collapsed.has(c.id);
+        const picked = cams.filter((k) => chosen.has(k.id)).length;
+        const all = el("input", { type: "checkbox", checked: picked === cams.length, title: t("common.select_all") });
+        all.indeterminate = picked > 0 && picked < cams.length;
+        all.onchange = () => { cams.forEach((k) => (all.checked ? chosen.add(k.id) : chosen.delete(k.id))); render(); };
+        const head = el("h4", { style: { cursor: "pointer" }, onclick: (e) => { if (e.target === all) return; if (collapsed.has(c.id)) collapsed.delete(c.id); else collapsed.add(c.id); render(); } },
+          el("label", { class: "check", onclick: (e) => e.stopPropagation() }, all),
+          el("span", { class: "dot " + (c.online ? "ok" : "off") }), c.name,
+          el("span", { class: "dim", style: { fontWeight: 400 } }, picked + "/" + cams.length),
+          icon(open ? "left" : "right", "nav-caret" + (open ? " open" : "")));
+        groups.append(el("div", { class: "cam-pick-group" }, head,
+          open ? el("div", { class: "list-check" }, cams.map((cam) => {
+            const cb = el("input", { type: "checkbox", checked: chosen.has(cam.id) });
+            cb.onchange = () => { if (cb.checked) chosen.add(cam.id); else chosen.delete(cam.id); all.checked = cams.every((k) => chosen.has(k.id)); all.indeterminate = !all.checked && cams.some((k) => chosen.has(k.id)); count(); };
+            return el("label", { class: "check" }, cb, cam.name, cam.location ? el("span", { class: "dim" }, " · " + cam.location) : null);
+          })) : null));
+      });
+      if (!shown) groups.append(el("p", { class: "muted" }, t("common.no_match")));
+      count();
+    }
+    render();
+    const body = el("div", null,
+      el("div", { class: "list-tools" }, CVMS.searchBox("", (v) => { q = v; render(); }, { width: "260px" }), el("div", { class: "spacer", style: { flex: 1 } }), counter),
+      groups);
     CVMS.modal({
-      title: t("layout.edit_cameras"), wide: true, body: groups,
+      title: t("layout.edit_cameras"), wide: true, body,
       actions: [{ label: t("common.cancel") }, {
         label: t("common.save"), kind: "primary", onClick: async () => {
           // keep existing order, append new ones
@@ -590,7 +694,9 @@
     const open = new Set();
     const tabs = el("div", { class: "tabs" });
     const box = el("div", { class: "card" });
-    c.append(tabs, box);
+    const ls = { q: "", page: 1 };
+    const tools = el("div", { class: "toolbar" }, CVMS.searchBox("", (v) => { ls.q = v; ls.page = 1; render(); }, { placeholder: t("clients.search_ph"), width: "280px" }));
+    c.append(tabs, tools, box);
 
     function render() {
       const counts = { all: S.clients.length, pending: 0, approved: 0, blocked: 0 };
@@ -600,10 +706,19 @@
         const b = el("button", { class: "tab" + (tab === k ? " active" : ""), onclick: () => { tab = k; CVMS.store.set("cvms.clients.tab", k); render(); } }, t("clients.tab_" + k) + " (" + (counts[k] || 0) + ")");
         return b;
       }));
-      const list = S.clients.filter((x) => tab === "all" || x.status === tab);
+      const byTab = S.clients.filter((x) => tab === "all" || x.status === tab);
+      const needle = ls.q.toLowerCase();
+      const filtered = byTab.filter((x) => !needle || [x.name, x.hostname, x.ip, x.os].some((v) => (v || "").toLowerCase().includes(needle)) ||
+        x.cameras.some((k) => k.name.toLowerCase().includes(needle) || (k.host || "").includes(needle)));
+      // pending first, then offline, then by name
+      const rank = (x) => (x.status === "pending" ? 0 : x.online ? 2 : 1);
+      filtered.sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+      const pg = CVMS.paginate(filtered, ls.page, 50);
+      ls.page = pg.page;
+      const list = pg.items;
       CVMS.clear(box);
       if (!list.length) {
-        box.append(CVMS.emptyState("server", t("clients.empty"), t("clients.empty_text")));
+        box.append(byTab.length ? CVMS.emptyState("search", t("common.no_match")) : CVMS.emptyState("server", t("clients.empty"), t("clients.empty_text")));
         return;
       }
       const tbody = el("tbody");
@@ -637,6 +752,7 @@
       box.append(el("div", { class: "table-wrap" }, el("table", { class: "table" },
         el("thead", null, el("tr", null, el("th", null, t("col.name")), el("th", null, t("col.status")), el("th", null, t("col.system")), el("th", null, t("col.cameras")), el("th", null, t("col.last_seen")), el("th"))),
         tbody)));
+      if (pg.pages > 1) box.append(el("div", { class: "card-body row", style: { justifyContent: "space-between" } }, el("span", { class: "muted" }, t("audit.total", { n: pg.total })), CVMS.pager(pg.page, pg.pages, (p) => { ls.page = p; render(); })));
       box.querySelectorAll(".cam-row .badge svg").forEach((s) => { s.style.width = "11px"; s.style.height = "11px"; });
     }
 
@@ -664,6 +780,7 @@
     }
 
     S.refresh = render;
+    S.onStatus = render;
     render();
   }
 
@@ -732,12 +849,24 @@
       const disabled = el("input", { type: "checkbox", checked: u ? u.disabled : false });
       const chosen = new Set(u ? u.clients : []);
       const approved = S.clients.filter((x) => x.status === "approved");
-      const list = el("div", { class: "list-check" }, approved.length ? approved.map((x) => {
+      const counter = el("span", { class: "muted", style: { fontSize: "12px" } });
+      const count = () => { counter.textContent = t("users.selected", { n: chosen.size, total: approved.length }); };
+      const rows = approved.map((x) => {
         const cb = el("input", { type: "checkbox", checked: chosen.has(x.id) });
-        cb.onchange = () => { if (cb.checked) chosen.add(x.id); else chosen.delete(x.id); };
-        return el("label", { class: "check" }, cb, el("span", { class: "dot " + (x.online ? "ok" : "off") }), x.name, el("span", { class: "dim" }, " · " + t("layout.cam_count", { n: x.cameras.length })));
-      }) : el("span", { class: "dim" }, t("users.no_approved")));
-      const permBox = el("div", null, el("div", { class: "field" }, el("label", null, t("users.allowed_clients")), list));
+        cb.onchange = () => { if (cb.checked) chosen.add(x.id); else chosen.delete(x.id); count(); };
+        const row = el("label", { class: "check" }, cb, el("span", { class: "dot " + (x.online ? "ok" : "off") }), x.name, el("span", { class: "dim" }, " · " + t("layout.cam_count", { n: x.cameras.length })));
+        return { x, cb, row };
+      });
+      const list = el("div", { class: "list-check" }, approved.length ? rows.map((r) => r.row) : el("span", { class: "dim" }, t("users.no_approved")));
+      const visibleRows = () => rows.filter((r) => !r.row.classList.contains("hidden-row"));
+      const setAll = (on) => { visibleRows().forEach((r) => { r.cb.checked = on; if (on) chosen.add(r.x.id); else chosen.delete(r.x.id); }); count(); };
+      const tools = approved.length > 1 ? el("div", { class: "list-tools" },
+        approved.length > 8 ? CVMS.searchBox("", (v) => { const q = v.toLowerCase(); rows.forEach((r) => r.row.classList.toggle("hidden-row", !!q && !r.x.name.toLowerCase().includes(q))); }, { width: "220px", delay: 0 }) : null,
+        btn({ label: t("common.select_all"), size: "sm", onClick: () => setAll(true) }),
+        btn({ label: t("common.select_none"), size: "sm", onClick: () => setAll(false) }),
+        el("span", { style: { flex: 1 } }), counter) : null;
+      count();
+      const permBox = el("div", null, el("div", { class: "field" }, el("label", null, t("users.allowed_clients")), tools, list));
       const syncRole = () => { permBox.style.display = role.value === "admin" ? "none" : ""; };
       role.onchange = syncRole;
       syncRole();
@@ -855,6 +984,9 @@
         el("div", { class: "card-head" }, el("div", null, el("h3", { class: "card-title" }, t("settings.server")), el("p", { class: "card-sub" }, t("settings.server_sub")))),
         el("div", { class: "card-body" }, el("dl", { class: "kv" },
           el("dt", null, t("settings.version")), el("dd", { class: "mono" }, info.version || S.me.version),
+          el("dt", null, t("settings.pipeline")), el("dd", null, info.pipeline ? el("span", { class: "badge " + (info.pipeline.hwaccel ? "badge-ok" : "badge-warn") }, info.pipeline.name) : "—"),
+          el("dt", null, t("settings.h265_fallback")), el("dd", null, t("settings.fallback_" + (info.h265_fallback || "server"))),
+          el("dt", null, t("settings.live")), el("dd", null, info.live ? t("settings.live_value", { s: info.live.streams, v: info.live.viewers, t: info.live.transcodes, c: info.live.clients_connected }) : "—"),
           el("dt", null, t("settings.client_url")), el("dd", { class: "mono" }, location.protocol + "//" + location.host),
           el("dt", null, t("settings.idle")), el("dd", null, S.me.viewer_idle_minutes ? t("time.minutes", { n: S.me.viewer_idle_minutes }) : "—")),
           el("p", { class: "muted", style: { margin: "14px 0 0", fontSize: "12px" } }, t("settings.config_hint")))));

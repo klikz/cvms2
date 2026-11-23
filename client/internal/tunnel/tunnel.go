@@ -8,12 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -35,12 +37,13 @@ const (
 
 // Status is shown in the client UI.
 type Status struct {
-	State     string    `json:"state"`
-	Approval  string    `json:"approval"` // pending | approved | blocked | unauthorized
-	ServerURL string    `json:"server_url"`
-	Error     string    `json:"error"`
-	Since     time.Time `json:"since"`
-	Streams   int       `json:"streams"`
+	State      string    `json:"state"`
+	Approval   string    `json:"approval"` // pending | approved | blocked | unauthorized
+	ServerURL  string    `json:"server_url"`
+	Error      string    `json:"error"`
+	Since      time.Time `json:"since"`
+	Streams    int       `json:"streams"`
+	Transcodes int       `json:"transcodes"`
 }
 
 // Tunnel is the server connection manager.
@@ -54,6 +57,8 @@ type Tunnel struct {
 	conn    *conn
 	reset   chan struct{}
 	streams map[uint32]context.CancelFunc
+
+	transcodes atomic.Int32
 }
 
 // New creates the tunnel.
@@ -72,6 +77,7 @@ func (t *Tunnel) Status() Status {
 	defer t.mu.Unlock()
 	s := t.status
 	s.Streams = len(t.streams)
+	s.Transcodes = int(t.transcodes.Load())
 	return s
 }
 
@@ -167,7 +173,8 @@ func (t *Tunnel) Run(ctx context.Context) {
 			return
 		case <-t.reset:
 			backoff = 2 * time.Second
-		case <-time.After(backoff):
+		case <-time.After(backoff + time.Duration(rand.Int64N(int64(backoff/2)+1))):
+			// jitter spreads reconnects of many clients after a server restart
 			if backoff < 30*time.Second {
 				backoff *= 2
 			}
@@ -366,18 +373,22 @@ func (t *Tunnel) pushStream(ctx context.Context, c *conn, m protocol.StreamStart
 		}
 	}
 	ffmpeg := t.cams.FFmpeg()
-	transcode := codec == "other" || (codec == protocol.CodecH265 && cfg.TranscodeMode == "client")
+	// The server asks for H.264 when a browser cannot play H.265
+	// (h265_fallback: client); non-H.264/H.265 sources are always converted.
+	transcode := codec == "other" || (codec == protocol.CodecH265 && m.Codec == protocol.CodecH264)
 	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin"}
-	var enc string
+	var pipe ffmpegx.Pipeline
 	if transcode {
-		enc = ffmpegx.PickEncoder(ffmpeg, cfg.H264Encoder)
-		args = append(args, ffmpegx.InputArgs(enc)...)
+		pipe = ffmpegx.PickPipeline(ffmpeg, cfg.HWAccel, cfg.H264Encoder, cfg.GPUDevice)
+		args = append(args, pipe.TranscodeInputArgs()...)
+		t.transcodes.Add(1)
+		defer t.transcodes.Add(-1)
 	}
 	args = append(args, "-fflags", "nobuffer", "-flags", "low_delay", "-rtsp_transport", "tcp", "-timeout", "8000000",
 		"-i", rtspURL, "-an", "-map", "0:v:0")
 	outCodec := codec
 	if transcode {
-		args = append(args, ffmpegx.EncoderArgs(enc)...)
+		args = append(args, pipe.EncodeArgs()...)
 		args = append(args, "-f", "h264", "pipe:1")
 		outCodec = protocol.CodecH264
 	} else if codec == protocol.CodecH265 {
@@ -401,7 +412,11 @@ func (t *Tunnel) pushStream(ctx context.Context, c *conn, m protocol.StreamStart
 		src = st.Codec
 	}
 	c.sendJSON(protocol.TypeStreamInfo, protocol.StreamInfoMsg{StreamID: m.StreamID, Codec: outCodec, SourceCodec: src, Transcoded: transcode})
-	log.Printf("stream %d start: %s %s (%s -> %s)", m.StreamID, cam.Name, m.Profile, src, outCodec)
+	if transcode {
+		log.Printf("stream %d start: %s %s (%s -> %s via %s)", m.StreamID, cam.Name, m.Profile, src, outCodec, pipe.Name)
+	} else {
+		log.Printf("stream %d start: %s %s (%s)", m.StreamID, cam.Name, m.Profile, src)
+	}
 
 	r := media.NewAUReader(stdout, outCodec)
 	needKey := true

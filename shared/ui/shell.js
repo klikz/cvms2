@@ -329,16 +329,45 @@
     return S;
   };
 
+  /* Section options: title, items, empty, key (enables collapse + search
+   * state), searchable (shows a filter when there are more than 8 items),
+   * actions: [{icon, title, active, onClick}], limit (max rendered items). */
+  const navQuery = {};
   shell.renderNav = function () {
     if (!S) return;
     const path = CVMS.router.path();
+    const focused = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.navSearch : null;
     CVMS.clear(S.nav);
     const sections = S.opts.nav();
     for (const sec of sections) {
-      const head = sec.title ? el("div", { class: "nav-section-title" }, el("span", null, sec.title), sec.action ? (() => { const b = CVMS.btn({ icon: sec.action.icon, kind: "ghost", size: "sm", title: sec.action.title, onClick: sec.action.onClick }); b.style.marginRight = "-6px"; return b; })() : null) : null;
+      const collapsed = sec.key && storageGet("cvms.nav.collapsed." + sec.key) === "1";
+      const actions = (sec.actions || (sec.action ? [sec.action] : [])).map((a) => {
+        const b = CVMS.btn({ icon: a.icon, kind: "ghost", size: "sm", title: a.title, onClick: (e) => { e.stopPropagation(); a.onClick(e); } });
+        if (a.active) b.classList.add("active");
+        return b;
+      });
+      const head = sec.title ? el("div", { class: "nav-section-title" + (sec.key ? " collapsible" : ""), onclick: sec.key ? () => { storageSet("cvms.nav.collapsed." + sec.key, collapsed ? "0" : "1"); shell.renderNav(); } : null },
+        el("span", { class: "row", style: { gap: "4px" } }, sec.key ? CVMS.icon(collapsed ? "right" : "left", "nav-caret" + (collapsed ? "" : " open")) : null, sec.title, sec.badge ? el("span", { class: "nav-count" }, sec.badge) : null),
+        actions.length ? el("span", { class: "nav-actions" }, actions) : null) : null;
       const box = el("div", { class: "nav-section" }, head);
-      if (!sec.items.length && sec.empty) box.appendChild(el("div", { class: "nav-empty" }, sec.empty));
-      for (const it of sec.items) {
+      S.nav.appendChild(box);
+      if (collapsed) continue;
+      let items = sec.items;
+      if (sec.searchable && sec.key && (items.length > 8 || navQuery[sec.key])) {
+        const inp = el("input", { class: "input nav-search", placeholder: t("common.search"), value: navQuery[sec.key] || "", "data-nav-search": sec.key });
+        inp.addEventListener("input", () => { navQuery[sec.key] = inp.value; shell.renderNav(); });
+        box.appendChild(inp);
+        if (focused === sec.key) setTimeout(() => { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }, 0);
+        const q = (navQuery[sec.key] || "").toLowerCase().trim();
+        if (q) items = items.filter((it) => it.label.toLowerCase().includes(q));
+      }
+      if (!items.length && (sec.empty || sec.items.length)) box.appendChild(el("div", { class: "nav-empty" }, sec.items.length ? t("common.no_match") : sec.empty));
+      const limit = sec.limit || 200;
+      if (items.length > limit) {
+        box.appendChild(el("div", { class: "nav-empty" }, t("common.more", { n: items.length - limit })));
+        items = items.slice(0, limit);
+      }
+      for (const it of items) {
         const href = it.href.replace(/^#/, "");
         const active = it.exact ? path === href : path === href || path.startsWith(href + "/");
         const a = el("a", { class: "nav-item" + (active ? " active" : ""), href: it.href, title: it.label, onclick: () => S.app.classList.remove("nav-open") },
@@ -347,7 +376,6 @@
           it.count !== undefined && it.count !== null && it.count !== 0 ? el("span", { class: "nav-count " + (it.countClass || "") }, String(it.count)) : null);
         box.appendChild(a);
       }
-      S.nav.appendChild(box);
     }
   };
 
@@ -442,11 +470,39 @@
     if (!codec) return null;
     return el("span", { class: "badge badge-codec " + (codec === "h265" ? "badge-info" : "badge-accent"), title: transcoded ? t("cam.transcoded") : "" }, codec.toUpperCase().replace("H26", "H.26") + (transcoded ? " → H.264" : ""));
   };
-  /* Simple pagination control. state: {page, pages}, onChange(page) */
+  /* Pagination control. With many pages the page number is an input to
+   * jump directly. onChange(page) */
   CVMS.pager = function (page, pages, onChange) {
+    pages = Math.max(1, pages);
+    let info;
+    if (pages > 5) {
+      const inp = el("input", { class: "input page-input", type: "number", min: "1", max: String(pages), value: String(page), title: t("common.go_to_page") });
+      const go = () => { const n = Math.min(pages, Math.max(1, parseInt(inp.value, 10) || 1)); if (n !== page) onChange(n); else inp.value = page; };
+      inp.addEventListener("change", go);
+      inp.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+      info = el("span", { class: "page-info row", style: { gap: "4px" } }, inp, "/ " + pages);
+    } else {
+      info = el("span", { class: "page-info" }, page + " / " + pages);
+    }
     return el("div", { class: "pager" },
       CVMS.btn({ icon: "left", size: "sm", disabled: page <= 1, onClick: () => onChange(page - 1) }),
-      el("span", { class: "page-info" }, page + " / " + Math.max(1, pages)),
+      info,
       CVMS.btn({ icon: "right", size: "sm", disabled: page >= pages, onClick: () => onChange(page + 1) }));
+  };
+
+  /* Paginates and filters a list. Returns {items, page, pages, total}. */
+  CVMS.paginate = function (list, page, per) {
+    const pages = Math.max(1, Math.ceil(list.length / per));
+    page = Math.min(Math.max(1, page), pages);
+    return { items: list.slice((page - 1) * per, page * per), page, pages, total: list.length };
+  };
+
+  /* Search input with icon. onInput(value) is debounced. */
+  CVMS.searchBox = function (value, onInput, opts) {
+    opts = opts || {};
+    const inp = el("input", { class: "input", placeholder: opts.placeholder || t("common.search"), value: value || "" });
+    let timer;
+    inp.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => onInput(inp.value.trim()), opts.delay === undefined ? 200 : opts.delay); });
+    return el("div", { class: "input-search", style: { width: opts.width || "240px" } }, CVMS.icon("search"), inp);
   };
 })();
