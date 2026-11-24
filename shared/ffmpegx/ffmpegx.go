@@ -4,6 +4,8 @@ package ffmpegx
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -207,45 +209,79 @@ func candidates(hwaccel, encoder, device string) []Pipeline {
 	return out
 }
 
+type pipeEntry struct {
+	p       Pipeline
+	final   bool          // a GPU pipeline, or no GPU candidates: never re-checked
+	retryAt time.Time     // when a CPU fallback is checked again
+	backoff time.Duration // next retry delay
+}
+
 var (
 	pipeMu    sync.Mutex
-	pipeCache = map[string]Pipeline{}
+	pipeCache = map[string]*pipeEntry{}
 	testClip  string
 	clipOnce  sync.Once
+)
+
+const (
+	retryFirst = time.Minute
+	retryMax   = 30 * time.Minute
 )
 
 // PickPipeline returns the pipeline to use. hwaccel is auto | cuda | qsv |
 // vaapi | d3d11va | none; encoder is auto or a specific H.264 encoder.
 // With auto every candidate is verified with a real H.265 decode + H.264
-// encode, so a GPU without drivers falls back cleanly. Results are cached.
+// encode, so a GPU without drivers falls back cleanly. Results are cached;
+// a CPU fallback is re-checked with backoff (1 min .. 30 min), because at
+// boot an OS service can start before the GPU driver is ready.
 func PickPipeline(ffmpeg, hwaccel, encoder, device string) Pipeline {
 	key := ffmpeg + "|" + hwaccel + "|" + encoder + "|" + device
 	pipeMu.Lock()
 	defer pipeMu.Unlock()
-	if p, ok := pipeCache[key]; ok {
-		return p
+	e, ok := pipeCache[key]
+	if ok && (e.final || time.Now().Before(e.retryAt)) {
+		return e.p
 	}
 	p := cpuPipeline
 	if encoder != "" && encoder != "auto" && (hwaccel == "none" || hwaccel == "cpu") {
 		p = Pipeline{Name: "CPU → " + encoder, Encoder: encoder}
 	}
+	cands := candidates(hwaccel, encoder, device)
 	clip := clipPath(ffmpeg)
-	for _, c := range candidates(hwaccel, encoder, device) {
-		if testPipeline(ffmpeg, clip, c) {
-			p = c
-			break
+	found := false
+	for _, c := range cands {
+		if err := testPipeline(ffmpeg, clip, c); err != nil {
+			if !ok { // log reasons once, not on every retry
+				log.Printf("ffmpeg: GPU pipeline %q unavailable: %v", c.Name, err)
+			}
+			continue
 		}
+		p, found = c, true
+		break
 	}
-	pipeCache[key] = p
+	if !ok {
+		e = &pipeEntry{backoff: retryFirst}
+		pipeCache[key] = e
+	} else if found {
+		log.Printf("ffmpeg: GPU became available, switching to %q", p.Name)
+	}
+	e.p = p
+	e.final = found || len(cands) == 0
+	if !e.final {
+		e.retryAt = time.Now().Add(e.backoff)
+		e.backoff = min(e.backoff*2, retryMax)
+	}
 	return p
 }
 
 // clipPath creates a tiny H.265 test clip once (H.264 if libx265 is missing).
+// The file name includes the pid, so a server and a client on the same host
+// never read each other's half-written clip.
 func clipPath(ffmpeg string) string {
 	clipOnce.Do(func() {
 		dir := os.TempDir()
 		for _, c := range []struct{ codec, ext string }{{"libx265", "hevc"}, {"libx264", "h264"}} {
-			f := filepath.Join(dir, "cvms-gputest."+c.ext)
+			f := filepath.Join(dir, fmt.Sprintf("cvms-gputest-%d.%s", os.Getpid(), c.ext))
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			err := exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=640x360:r=10",
 				"-frames:v", "10", "-pix_fmt", "yuv420p", "-c:v", c.codec, "-f", c.ext, f).Run()
@@ -277,10 +313,22 @@ func TestArgs(p Pipeline, clip string) []string {
 	return append(args, "-f", "null", "-")
 }
 
-func testPipeline(ffmpeg, clip string, p Pipeline) bool {
+// testPipeline runs a short transcode; the error carries ffmpeg's message.
+func testPipeline(ffmpeg, clip string, p Pipeline) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	return exec.CommandContext(ctx, ffmpeg, TestArgs(p, clip)...).Run() == nil
+	out, err := exec.CommandContext(ctx, ffmpeg, TestArgs(p, clip)...).CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	msg := strings.TrimSpace(string(out))
+	if len(msg) > 400 {
+		msg = msg[len(msg)-400:]
+	}
+	if msg == "" {
+		return err
+	}
+	return fmt.Errorf("%v: %s", err, strings.ReplaceAll(msg, "\n", " | "))
 }
 
 // SnapshotPipeline returns the pipeline used for GPU-decoded snapshots;

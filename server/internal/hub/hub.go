@@ -91,11 +91,12 @@ func (h *Hub) FFmpeg() string { return h.ffmpeg }
 func (h *Hub) Pipeline() ffmpegx.Pipeline {
 	h.pipeMu.Lock()
 	defer h.pipeMu.Unlock()
-	if !h.pipeDone {
-		h.pipe = ffmpegx.PickPipeline(h.ffmpeg, h.cfg.HWAccel, h.cfg.H264Encoder, h.cfg.GPUDevice)
-		h.pipeDone = true
+	if h.pipeDone { // fixed pipeline (tests)
+		return h.pipe
 	}
-	return h.pipe
+	// ffmpegx caches the result and re-checks a CPU fallback later, so a GPU
+	// whose driver was not ready at boot is picked up without a restart.
+	return ffmpegx.PickPipeline(h.ffmpeg, h.cfg.HWAccel, h.cfg.H264Encoder, h.cfg.GPUDevice)
 }
 
 // Run runs background maintenance until ctx is done.
