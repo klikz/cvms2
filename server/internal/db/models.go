@@ -13,16 +13,19 @@ import (
 
 // User is a server account.
 type User struct {
-	ID           int64   `json:"id"`
-	Username     string  `json:"username"`
-	PasswordHash string  `json:"-"`
-	Role         string  `json:"role"`
-	Lang         string  `json:"lang"`
-	MustChange   bool    `json:"must_change"`
-	Disabled     bool    `json:"disabled"`
-	CreatedAt    int64   `json:"created_at"`
-	LastLogin    int64   `json:"last_login"`
-	Clients      []int64 `json:"clients"`
+	ID           int64  `json:"id"`
+	Username     string `json:"username"`
+	PasswordHash string `json:"-"`
+	Role         string `json:"role"`
+	Lang         string `json:"lang"`
+	MustChange   bool   `json:"must_change"`
+	Disabled     bool   `json:"disabled"`
+	CreatedAt    int64  `json:"created_at"`
+	LastLogin    int64  `json:"last_login"`
+	// ViewerIdleMinutes pauses streams after this much inactivity:
+	// nil = server default, 0 = never, n = minutes.
+	ViewerIdleMinutes *int    `json:"viewer_idle_minutes"`
+	Clients           []int64 `json:"clients"`
 }
 
 // Roles.
@@ -34,12 +37,13 @@ const (
 // IsAdmin reports whether the user is an admin.
 func (u *User) IsAdmin() bool { return u.Role == RoleAdmin }
 
-const userCols = `id, username, password_hash, role, lang, must_change, disabled, created_at, last_login`
+const userCols = `id, username, password_hash, role, lang, must_change, disabled, created_at, last_login, viewer_idle_minutes`
 
 func scanUser(s interface{ Scan(...any) error }) (*User, error) {
 	u := &User{}
 	var mc, dis int
-	err := s.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.Lang, &mc, &dis, &u.CreatedAt, &u.LastLogin)
+	var idle sql.NullInt64
+	err := s.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.Lang, &mc, &dis, &u.CreatedAt, &u.LastLogin, &idle)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -47,6 +51,10 @@ func scanUser(s interface{ Scan(...any) error }) (*User, error) {
 		return nil, err
 	}
 	u.MustChange, u.Disabled = mc == 1, dis == 1
+	if idle.Valid {
+		n := int(idle.Int64)
+		u.ViewerIdleMinutes = &n
+	}
 	return u, nil
 }
 
@@ -105,8 +113,8 @@ func (d *DB) Users() ([]*User, error) {
 
 // CreateUser inserts a user.
 func (d *DB) CreateUser(u *User) error {
-	res, err := d.Exec(`INSERT INTO users(username, password_hash, role, lang, must_change, disabled, created_at) VALUES(?,?,?,?,?,?,?)`,
-		u.Username, u.PasswordHash, u.Role, u.Lang, boolInt(u.MustChange), boolInt(u.Disabled), Now())
+	res, err := d.Exec(`INSERT INTO users(username, password_hash, role, lang, must_change, disabled, created_at, viewer_idle_minutes) VALUES(?,?,?,?,?,?,?,?)`,
+		u.Username, u.PasswordHash, u.Role, u.Lang, boolInt(u.MustChange), boolInt(u.Disabled), Now(), u.ViewerIdleMinutes)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			return ErrExists
@@ -122,8 +130,8 @@ var ErrExists = errors.New("already exists")
 
 // UpdateUser saves role, disabled and optionally password.
 func (d *DB) UpdateUser(u *User) error {
-	_, err := d.Exec(`UPDATE users SET role=?, disabled=?, password_hash=?, must_change=?, lang=? WHERE id=?`,
-		u.Role, boolInt(u.Disabled), u.PasswordHash, boolInt(u.MustChange), u.Lang, u.ID)
+	_, err := d.Exec(`UPDATE users SET role=?, disabled=?, password_hash=?, must_change=?, lang=?, viewer_idle_minutes=? WHERE id=?`,
+		u.Role, boolInt(u.Disabled), u.PasswordHash, boolInt(u.MustChange), u.Lang, u.ViewerIdleMinutes, u.ID)
 	return err
 }
 

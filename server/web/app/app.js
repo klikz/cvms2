@@ -822,16 +822,25 @@
     const box = el("div", { class: "card" });
     c.append(box);
     let users = [];
+    let idleDefault = 0;
+    // viewer_idle_minutes: null = server default, 0 = never, n = minutes
+    const idleText = (v) => v === 0 ? t("users.idle_never") : t("time.minutes", { n: v });
+    const idleCell = (v) => v == null ? el("span", { class: "dim" }, t("users.idle_default", { v: idleDefault ? idleText(idleDefault) : t("users.idle_never") })) : el("span", { class: "badge" }, idleText(v));
 
     async function load() {
-      try { users = await api("/api/users"); render(); } catch (e) { CVMS.err(e); }
+      try {
+        const [list, info] = await Promise.all([api("/api/users"), api("/api/info").catch(() => ({}))]);
+        users = list;
+        idleDefault = info.viewer_idle_default || 0;
+        render();
+      } catch (e) { CVMS.err(e); }
     }
     function render() {
       CVMS.clear(box);
       const approved = S.clients.filter((x) => x.status === "approved");
       const name = (id) => { const x = S.clients.find((k) => k.id === id); return x ? x.name : "#" + id; };
       box.append(el("div", { class: "table-wrap" }, el("table", { class: "table" },
-        el("thead", null, el("tr", null, el("th", null, t("auth.username")), el("th", null, t("users.role")), el("th", null, t("col.status")), el("th", null, t("users.clients")), el("th", null, t("users.last_login")), el("th"))),
+        el("thead", null, el("tr", null, el("th", null, t("auth.username")), el("th", null, t("users.role")), el("th", null, t("col.status")), el("th", null, t("users.clients")), el("th", null, t("users.idle")), el("th", null, t("users.last_login")), el("th"))),
         el("tbody", null, users.map((u) => el("tr", null,
           el("td", null, el("div", { class: "row" }, el("span", { class: "avatar" }, u.username.slice(0, 2)), el("b", null, u.username), u.id === S.me.id ? el("span", { class: "badge" }, t("users.you")) : null)),
           el("td", null, el("span", { class: "badge " + (u.role === "admin" ? "badge-info" : "") }, t("role." + u.role))),
@@ -840,6 +849,7 @@
           el("td", null, u.role === "admin" ? el("span", { class: "muted" }, t("users.all_clients")) :
             u.clients.length ? el("div", { class: "chip-list" }, u.clients.slice(0, 4).map((id) => el("span", { class: "badge" }, name(id))), u.clients.length > 4 ? el("span", { class: "badge" }, "+" + (u.clients.length - 4)) : null) :
               el("span", { class: "dim" }, t("users.no_clients"))),
+          el("td", { style: { whiteSpace: "nowrap" } }, idleCell(u.viewer_idle_minutes)),
           el("td", { class: "muted" }, u.last_login ? fmt.ago(u.last_login) : "—"),
           el("td", { class: "actions" },
             btn({ icon: "edit", size: "sm", title: t("common.edit"), onClick: () => editUser(u) }),
@@ -853,6 +863,26 @@
       const pw = el("input", { class: "input", type: "password", autocomplete: "new-password", placeholder: isNew ? "" : t("users.pw_keep") });
       const role = el("select", { class: "select" }, ["user", "admin"].map((r) => el("option", { value: r, selected: (u ? u.role : "user") === r }, t("role." + r))));
       const disabled = el("input", { type: "checkbox", checked: u ? u.disabled : false });
+      const idleCur = u ? u.viewer_idle_minutes : null;
+      const idlePresets = [5, 10, 15, 30, 60, 120];
+      const idleInitial = idleCur == null ? "default" : idleCur === 0 ? "never" : idlePresets.includes(idleCur) ? String(idleCur) : "custom";
+      const idleSel = el("select", { class: "select" },
+        el("option", { value: "default", selected: idleInitial === "default" }, t("users.idle_default", { v: idleDefault ? idleText(idleDefault) : t("users.idle_never") })),
+        el("option", { value: "never", selected: idleInitial === "never" }, t("users.idle_never")),
+        idlePresets.map((n) => el("option", { value: String(n), selected: idleInitial === String(n) }, t("time.minutes", { n }))),
+        el("option", { value: "custom", selected: idleInitial === "custom" }, t("users.idle_custom")));
+      const idleNum = el("input", { class: "input", type: "number", min: "1", max: "1440", step: "1", value: idleInitial === "custom" ? String(idleCur) : "", placeholder: t("users.idle_minutes_ph") });
+      const syncIdle = () => { idleNum.style.display = idleSel.value === "custom" ? "" : "none"; };
+      idleSel.onchange = () => { syncIdle(); if (idleSel.value === "custom") idleNum.focus(); };
+      syncIdle();
+      const idleValue = () => {
+        const v = idleSel.value;
+        if (v === "default") return null;
+        if (v === "never") return 0;
+        const n = Number(v === "custom" ? idleNum.value : v);
+        if (!Number.isInteger(n) || n < 1 || n > 1440) throw new Error(t("users.idle_invalid"));
+        return n;
+      };
       const chosen = new Set(u ? u.clients : []);
       const approved = S.clients.filter((x) => x.status === "approved");
       const counter = el("span", { class: "muted", style: { fontSize: "12px" } });
@@ -881,11 +911,12 @@
         body: el("div", null,
           el("div", { class: "form-row" }, CVMS.field(t("auth.username"), uname), CVMS.field(t("users.role"), role)),
           CVMS.field(isNew ? t("auth.password") : t("users.new_password"), pw, t("auth.password_hint")),
+          CVMS.field(t("users.idle"), el("div", { class: "row" }, idleSel, idleNum), t("users.idle_hint")),
           !isNew ? el("div", { class: "field" }, el("label", { class: "check" }, disabled, t("users.disable"))) : null,
           permBox),
         actions: [{ label: t("common.cancel") }, {
           label: isNew ? t("common.create") : t("common.save"), kind: "primary", onClick: async () => {
-            const body = { username: uname.value.trim(), password: pw.value, role: role.value, disabled: disabled.checked, clients: role.value === "admin" ? [] : [...chosen] };
+            const body = { username: uname.value.trim(), password: pw.value, role: role.value, disabled: disabled.checked, clients: role.value === "admin" ? [] : [...chosen], viewer_idle_minutes: idleValue() };
             if (isNew) await api("/api/users", { method: "POST", body });
             else await api("/api/users/" + u.id, { method: "PUT", body });
             CVMS.toast(t("users.saved"), "ok");
@@ -993,7 +1024,7 @@
           el("dt", null, t("settings.h265_fallback")), el("dd", null, t("settings.fallback_" + (info.h265_fallback || "server"))),
           el("dt", null, t("settings.live")), el("dd", null, info.live ? t("settings.live_value", { s: info.live.streams, v: info.live.viewers, t: info.live.transcodes, c: info.live.clients_connected }) : "—"),
           el("dt", null, t("settings.client_url")), el("dd", { class: "mono" }, location.protocol + "//" + location.host),
-          el("dt", null, t("settings.idle")), el("dd", null, S.me.viewer_idle_minutes ? t("time.minutes", { n: S.me.viewer_idle_minutes }) : "—")),
+          el("dt", null, t("settings.idle_default")), el("dd", null, info.viewer_idle_default ? t("time.minutes", { n: info.viewer_idle_default }) : t("users.idle_never"))),
           el("p", { class: "muted", style: { margin: "14px 0 0", fontSize: "12px" } }, t("settings.config_hint")))));
       c.append(CVMS.autostartCard());
     }

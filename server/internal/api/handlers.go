@@ -71,6 +71,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		out["users"] = users
 		out["pipeline"] = s.hub.Pipeline()
 		out["h265_fallback"] = s.cfg.H265Fallback
+		out["viewer_idle_default"] = s.cfg.ViewerIdleMinutes
 		out["live"] = s.hub.Stats()
 	}
 	writeJSON(w, out)
@@ -467,6 +468,28 @@ type userReq struct {
 	Disabled   bool    `json:"disabled"`
 	MustChange bool    `json:"must_change"`
 	Clients    []int64 `json:"clients"`
+	// ViewerIdleMinutes: null = server default, 0 = never, 1..1440 minutes.
+	ViewerIdleMinutes *int `json:"viewer_idle_minutes"`
+}
+
+const maxIdleMinutes = 1440
+
+func validIdle(v *int) bool { return v == nil || (*v >= 0 && *v <= maxIdleMinutes) }
+
+func idleLabel(v *int) string {
+	switch {
+	case v == nil:
+		return "default"
+	case *v == 0:
+		return "never"
+	}
+	return strconv.Itoa(*v) + "m"
+}
+
+func sameIdle(a, b *int) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
+
+func badIdle(w http.ResponseWriter) {
+	apiError(w, http.StatusBadRequest, "bad_idle", "pause on inactivity: 0 (never) to 1440 minutes")
 }
 
 func (s *Server) handleUserCreate(w http.ResponseWriter, r *http.Request) {
@@ -486,12 +509,16 @@ func (s *Server) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 	if req.Role != db.RoleAdmin {
 		req.Role = db.RoleUser
 	}
+	if !validIdle(req.ViewerIdleMinutes) {
+		badIdle(w)
+		return
+	}
 	h, err := HashPassword(req.Password)
 	if err != nil {
 		internalError(w, err)
 		return
 	}
-	u := &db.User{Username: req.Username, PasswordHash: h, Role: req.Role, Disabled: req.Disabled}
+	u := &db.User{Username: req.Username, PasswordHash: h, Role: req.Role, Disabled: req.Disabled, ViewerIdleMinutes: req.ViewerIdleMinutes}
 	if err := s.db.CreateUser(u); err != nil {
 		if errors.Is(err, db.ErrExists) {
 			apiError(w, http.StatusConflict, "user_exists", "username already exists")
@@ -523,6 +550,10 @@ func (s *Server) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.Role != db.RoleAdmin {
 		req.Role = db.RoleUser
 	}
+	if !validIdle(req.ViewerIdleMinutes) {
+		badIdle(w)
+		return
+	}
 	// never lock out the last admin
 	if u.IsAdmin() && (req.Role != db.RoleAdmin || req.Disabled) {
 		if u.ID == me.ID {
@@ -541,7 +572,10 @@ func (s *Server) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
 	if u.Disabled != req.Disabled {
 		changes = append(changes, "disabled="+strconv.FormatBool(req.Disabled))
 	}
-	u.Role, u.Disabled = req.Role, req.Disabled
+	if !sameIdle(u.ViewerIdleMinutes, req.ViewerIdleMinutes) {
+		changes = append(changes, "idle="+idleLabel(req.ViewerIdleMinutes))
+	}
+	u.Role, u.Disabled, u.ViewerIdleMinutes = req.Role, req.Disabled, req.ViewerIdleMinutes
 	if req.Password != "" {
 		if len(req.Password) < 6 {
 			apiError(w, http.StatusBadRequest, "weak_password", "password must be at least 6 characters")

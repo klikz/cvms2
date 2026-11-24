@@ -409,5 +409,14 @@
   "nav.favorites": "Favorites",
   "fav.toggle": "Add to / remove from favorites",
   "fav.empty": "No favorite cameras",
-  "fav.empty_text": "Click the star on a camera to add it here."
+  "fav.empty_text": "Click the star on a camera to add it here.",
+  "users.idle": "Pause on inactivity",
+  "users.idle_default": "Default ({v})",
+  "users.idle_never": "Never",
+  "users.idle_custom": "Custom…",
+  "users.idle_minutes_ph": "minutes",
+  "users.idle_hint": "Streams stop after this much inactivity to save bandwidth. Default uses viewer_idle_minutes from config.yaml.",
+  "users.idle_invalid": "Pause on inactivity: enter 1 to 1440 minutes",
+  "settings.idle_default": "Pause on inactivity (default)",
+  "err.bad_idle": "Pause on inactivity: 0 (never) to 1440 minutes"
 }

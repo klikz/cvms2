@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -30,7 +31,8 @@ CREATE TABLE IF NOT EXISTS users (
 	must_change   INTEGER NOT NULL DEFAULT 0,
 	disabled      INTEGER NOT NULL DEFAULT 0,
 	created_at    INTEGER NOT NULL,
-	last_login    INTEGER NOT NULL DEFAULT 0
+	last_login    INTEGER NOT NULL DEFAULT 0,
+	viewer_idle_minutes INTEGER
 );
 CREATE TABLE IF NOT EXISTS sessions (
 	token      TEXT PRIMARY KEY,
@@ -113,9 +115,49 @@ func Open(path string) (*DB, error) {
 		sdb.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	if err := migrateColumns(sdb); err != nil {
+		sdb.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
 	// Cameras are reported again when clients reconnect.
 	_, _ = sdb.Exec(`UPDATE cameras SET online=0`)
 	return &DB{sdb}, nil
+}
+
+// migrateColumns adds columns introduced after a table was first created.
+func migrateColumns(sdb *sql.DB) error {
+	for _, c := range []struct{ table, column, def string }{
+		{"users", "viewer_idle_minutes", "INTEGER"},
+	} {
+		has, err := hasColumn(sdb, c.table, c.column)
+		if err != nil {
+			return err
+		}
+		if !has {
+			if _, err := sdb.Exec(`ALTER TABLE ` + c.table + ` ADD COLUMN ` + c.column + ` ` + c.def); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func hasColumn(sdb *sql.DB, table, column string) (bool, error) {
+	rows, err := sdb.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, err
+		}
+		if strings.EqualFold(name, column) {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // Now returns the current time in unix milliseconds.

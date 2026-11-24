@@ -158,8 +158,17 @@ func (s *Server) meResponse(u *db.User) map[string]any {
 		"lang":                u.Lang,
 		"must_change":         false,
 		"version":             s.version,
-		"viewer_idle_minutes": s.cfg.ViewerIdleMinutes,
+		"viewer_idle_minutes": s.viewerIdle(u),
 	}
+}
+
+// viewerIdle is the user's effective pause-on-inactivity time in minutes
+// (0 = never): their own setting, or the server default.
+func (s *Server) viewerIdle(u *db.User) int {
+	if u.ViewerIdleMinutes != nil {
+		return *u.ViewerIdleMinutes
+	}
+	return s.cfg.ViewerIdleMinutes
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {

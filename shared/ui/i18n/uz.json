@@ -409,5 +409,14 @@
   "nav.favorites": "Saqlanganlar",
   "fav.toggle": "Saqlanganlarga qo'shish / olib tashlash",
   "fav.empty": "Saqlangan kamera yo'q",
-  "fav.empty_text": "Kamera ustidagi yulduzchani bosing — kamera shu yerga qo'shiladi."
+  "fav.empty_text": "Kamera ustidagi yulduzchani bosing — kamera shu yerga qo'shiladi.",
+  "users.idle": "Harakatsizlikda to'xtatish",
+  "users.idle_default": "Standart ({v})",
+  "users.idle_never": "Hech qachon",
+  "users.idle_custom": "Boshqa qiymat…",
+  "users.idle_minutes_ph": "daqiqa",
+  "users.idle_hint": "Trafikni tejash uchun shuncha vaqt harakatsizlikdan keyin oqimlar to'xtatiladi. Standart qiymat config.yaml dagi viewer_idle_minutes.",
+  "users.idle_invalid": "Harakatsizlikda to'xtatish: 1 dan 1440 gacha daqiqa kiriting",
+  "settings.idle_default": "Harakatsizlikda to'xtatish (standart)",
+  "err.bad_idle": "Harakatsizlikda to'xtatish: 0 (hech qachon) dan 1440 daqiqagacha"
 }
