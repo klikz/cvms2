@@ -71,6 +71,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		out["users"] = users
 		out["pipeline"] = s.hub.Pipeline()
 		out["h265_fallback"] = s.cfg.H265Fallback
+		out["h265_passthrough"] = s.cfg.H265Passthrough
 		out["viewer_idle_default"] = s.cfg.ViewerIdleMinutes
 		out["live"] = s.hub.Stats()
 	}

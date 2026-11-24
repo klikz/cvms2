@@ -365,6 +365,8 @@ func (t *Tunnel) pushStream(ctx context.Context, c *conn, m protocol.StreamStart
 		return errors.New("unknown camera")
 	}
 	cfg := t.store.Get()
+	// no sub stream: make one from main, scaled down (sub_from_main)
+	virtual := m.Profile == protocol.ProfileSub && cam.VirtualSub(cfg.SubFromMain)
 	rtspURL, st := cam.StreamURL(m.Profile)
 	if rtspURL == "" {
 		return errors.New("no stream url")
@@ -384,7 +386,7 @@ func (t *Tunnel) pushStream(ctx context.Context, c *conn, m protocol.StreamStart
 	ffmpeg := t.cams.FFmpeg()
 	// The server asks for H.264 when a browser cannot play H.265
 	// (h265_fallback: client); non-H.264/H.265 sources are always converted.
-	transcode := codec == "other" || (codec == protocol.CodecH265 && m.Codec == protocol.CodecH264)
+	transcode := virtual || codec == "other" || (codec == protocol.CodecH265 && m.Codec == protocol.CodecH264)
 	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin"}
 	var pipe ffmpegx.Pipeline
 	if transcode {
@@ -396,7 +398,11 @@ func (t *Tunnel) pushStream(ctx context.Context, c *conn, m protocol.StreamStart
 	args = append(args, "-fflags", "nobuffer", "-flags", "low_delay", "-rtsp_transport", "tcp", "-timeout", "8000000",
 		"-i", rtspURL, "-an", "-map", "0:v:0")
 	outCodec := codec
-	if transcode {
+	if virtual {
+		args = append(args, pipe.EncodeArgsScaled(config.VirtualSubWidth, config.VirtualSubHeight)...)
+		args = append(args, "-f", "h264", "pipe:1")
+		outCodec = protocol.CodecH264
+	} else if transcode {
 		args = append(args, pipe.EncodeArgs()...)
 		args = append(args, "-f", "h264", "pipe:1")
 		outCodec = protocol.CodecH264
@@ -421,7 +427,9 @@ func (t *Tunnel) pushStream(ctx context.Context, c *conn, m protocol.StreamStart
 		src = st.Codec
 	}
 	c.sendJSON(protocol.TypeStreamInfo, protocol.StreamInfoMsg{StreamID: m.StreamID, Codec: outCodec, SourceCodec: src, Transcoded: transcode})
-	if transcode {
+	if virtual {
+		log.Printf("stream %d start: %s sub from main (%s -> %s %dx%d via %s)", m.StreamID, cam.Name, src, outCodec, config.VirtualSubWidth, config.VirtualSubHeight, pipe.Name)
+	} else if transcode {
 		log.Printf("stream %d start: %s %s (%s -> %s via %s)", m.StreamID, cam.Name, m.Profile, src, outCodec, pipe.Name)
 	} else {
 		log.Printf("stream %d start: %s %s (%s)", m.StreamID, cam.Name, m.Profile, src)

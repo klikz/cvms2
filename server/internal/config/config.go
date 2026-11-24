@@ -47,7 +47,11 @@ type Config struct {
 	// H265Fallback: where H.265 is converted for browsers that cannot play
 	// H.265: server | client (the camera's client GPU does it).
 	H265Fallback string `yaml:"h265_fallback"`
-	WebRTC       WebRTC `yaml:"webrtc"`
+	// H265Passthrough sends H.265 unchanged to browsers that say they can
+	// decode it. Set false to always deliver H.264 (some Chrome + GPU driver
+	// combinations crash the tab on H.265, "Aw, Snap! SIGILL").
+	H265Passthrough bool   `yaml:"h265_passthrough"`
+	WebRTC          WebRTC `yaml:"webrtc"`
 	// AuditViews: which camera views are logged: main | all | none.
 	AuditViews string `yaml:"audit_views"`
 	// Autostart installs the server as an OS service that starts at boot.
@@ -71,6 +75,7 @@ func Default() *Config {
 		HWAccel:              "auto",
 		H264Encoder:          "auto",
 		H265Fallback:         "server",
+		H265Passthrough:      true,
 		AuditViews:           "main",
 		Autostart:            true,
 		WebRTC: WebRTC{

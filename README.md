@@ -90,12 +90,15 @@ avtomatik WebSocket (MSE) orqali ko'rsatishga o'tadi.
 
 ## Video yo'li
 
-- Grid: **sub stream**, 2 marta bosilganda: **main stream**. Oqim faqat kimdir ko'rayotganda ishlaydi
+- Grid: **sub stream**, 2 marta bosilganda: **main stream**. Kamerada sub stream bo'lmasa, client main oqimdan
+  kichik sub yasaydi (640×360 H.264, GPU bo'lsa GPU'da; `sub_from_main: true`, default). Grid'da `SUB*` belgisi. Oqim faqat kimdir ko'rayotganda ishlaydi
   (`stream_idle_seconds`, default 30 s, dan keyin to'xtaydi), bitta oqim ko'p tomoshabinga umumiy.
 - **H.264**: o'zgartirishsiz uzatiladi.
 - **H.265**: brauzer qo'llasa (Chrome/Edge 136+ GPU bilan, Safari) **o'zgartirishsiz** uzatiladi —
   transcode yo'q. Qo'llamasa H.264 ga o'giriladi: serverda (`h265_fallback: server`, default) yoki
   kamera turgan clientda (`h265_fallback: client`). Transcoder faqat H.264 tomoshabin bo'lgan paytda ishlaydi.
+  Chrome H.265'da yiqilsa ("Aw, Snap! SIGILL" — ba'zi GPU drayverlarida) `h265_passthrough: false` qiling:
+  server har doim H.264 beradi (H.265 kameralar uchun transcode ishlaydi).
 - **GPU**: server va client `hwaccel: auto` bilan bor GPU'ni topadi (NVIDIA CUDA/NVENC, Intel QSV,
   Linux VAAPI, Windows D3D11VA+AMF) va H.265 decode + H.264 encode'ni to'liq GPU'da qiladi.
   Avtoaniqlash haqiqiy sinov kodlash bilan tekshiradi; GPU ishlamasa CPU'ga qaytadi.

@@ -34,6 +34,29 @@ func TestPipelineArgs(t *testing.T) {
 	}
 }
 
+func TestEncodeArgsScaled(t *testing.T) {
+	cases := []struct {
+		p    Pipeline
+		want string
+	}{
+		{Pipeline{HWAccel: "cuda", Encoder: "h264_nvenc"}, "-vf scale_cuda=w=640:h=360:format=nv12 -c:v h264_nvenc"},
+		{Pipeline{HWAccel: "vaapi", Encoder: "h264_vaapi"}, "-vf scale_vaapi=w=640:h=360:format=nv12 -c:v h264_vaapi"},
+		{Pipeline{HWAccel: "d3d11va", Encoder: "h264_amf"}, "-vf scale=640:-2 -c:v h264_amf"},
+		{Pipeline{HWAccel: "qsv", Encoder: "h264_qsv"}, "-vf scale=640:-2 -pix_fmt nv12 -c:v h264_qsv"},
+		{Pipeline{Encoder: "h264_vaapi"}, "-vaapi_device /dev/dri/renderD128 -vf scale=640:-2,format=nv12,hwupload -c:v h264_vaapi"},
+		{cpuPipeline, "-vf scale=640:-2 -c:v libx264"},
+	}
+	for _, c := range cases {
+		got := strings.Join(c.p.EncodeArgsScaled(640, 360), " ")
+		if !strings.HasPrefix(got, c.want) {
+			t.Errorf("%v: got %q want prefix %q", c.p, got, c.want)
+		}
+	}
+	if got := strings.Join((Pipeline{Encoder: "h264_vaapi"}).EncodeArgs(), " "); !strings.HasPrefix(got, "-vaapi_device /dev/dri/renderD128 -vf format=nv12,hwupload -c:v h264_vaapi") {
+		t.Errorf("unscaled vaapi upload: %q", got)
+	}
+}
+
 func qsvInput() string {
 	if runtime.GOOS == "windows" {
 		return "-hwaccel d3d11va"

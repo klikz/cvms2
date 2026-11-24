@@ -99,6 +99,9 @@ func (h *Hub) Subscribe(cam *db.Camera, profile string, h265OK bool) (*Viewer, e
 	if profile != protocol.ProfileMain {
 		profile = protocol.ProfileSub
 	}
+	if !h.cfg.H265Passthrough {
+		h265OK = false
+	}
 	native := cam.Main.Codec
 	if profile == protocol.ProfileSub && cam.Sub.Available {
 		native = cam.Sub.Codec

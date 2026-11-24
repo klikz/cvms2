@@ -94,6 +94,9 @@ type StreamInfo struct {
 	Codec     string `json:"codec,omitempty"`
 	Width     int    `json:"width,omitempty"`
 	Height    int    `json:"height,omitempty"`
+	// Virtual: the camera has no sub stream; the client makes one by
+	// scaling the main stream down to H.264.
+	Virtual bool `json:"virtual,omitempty"`
 }
 
 // CameraInfo describes one camera of a client.

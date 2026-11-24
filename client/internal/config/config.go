@@ -76,6 +76,10 @@ type Config struct {
 	// GPUDevice selects a GPU when there are several.
 	GPUDevice   string `yaml:"gpu_device"`
 	H264Encoder string `yaml:"h264_encoder"`
+	// SubFromMain: for cameras without a sub stream, make one on this PC by
+	// scaling the main stream down to H.264 (VirtualSubWidth×VirtualSubHeight)
+	// so the server grid does not get the heavy main stream.
+	SubFromMain bool `yaml:"sub_from_main"`
 	// Autostart installs the client as an OS service that starts at boot.
 	Autostart bool     `yaml:"autostart"`
 	Cameras   []Camera `yaml:"cameras"`
@@ -92,6 +96,7 @@ func defaults() *Config {
 		SnapshotConcurrency: 4,
 		HWAccel:             "auto",
 		H264Encoder:         "auto",
+		SubFromMain:         true,
 		Autostart:           true,
 		Cameras:             []Camera{},
 	}
@@ -271,6 +276,18 @@ func (s *Store) save() error {
 
 // Path returns the config file path.
 func (s *Store) Path() string { return s.path }
+
+// Size of the sub stream the client makes from the main stream.
+const (
+	VirtualSubWidth  = 640
+	VirtualSubHeight = 360
+)
+
+// VirtualSub reports whether the camera's sub stream is made from the main
+// stream (no sub URL, sub_from_main enabled).
+func (c Camera) VirtualSub(subFromMain bool) bool {
+	return subFromMain && c.Sub.URL == "" && c.Main.URL != ""
+}
 
 // StreamURL returns the RTSP URL of a camera stream with credentials
 // injected. profile "sub" falls back to main when no sub stream exists.

@@ -140,35 +140,57 @@ func (p Pipeline) DecodeInputArgs() []string { return p.hwInput(false) }
 
 // EncodeArgs returns filter and low-latency H.264 encoder arguments. A short
 // GOP lets new viewers start quickly.
-func (p Pipeline) EncodeArgs() []string {
-	var a []string
+func (p Pipeline) EncodeArgs() []string { return p.EncodeArgsScaled(0, 0) }
+
+// EncodeArgsScaled is EncodeArgs with the output scaled down to w×h
+// (0 keeps the source size). The CPU scaler keeps the aspect ratio
+// (height derived from w); GPU scalers use w×h as given.
+func (p Pipeline) EncodeArgsScaled(w, h int) []string {
+	var a, vf []string
+	size := ""
+	if w > 0 && h > 0 {
+		size = fmt.Sprintf("w=%d:h=%d:", w, h)
+	}
+	cpuScale := func() {
+		if w > 0 {
+			vf = append(vf, fmt.Sprintf("scale=%d:-2", w))
+		}
+	}
 	switch p.HWAccel {
 	case "cuda":
-		a = append(a, "-vf", "scale_cuda=format=nv12")
+		vf = append(vf, "scale_cuda="+size+"format=nv12")
 	case "vaapi":
-		a = append(a, "-vf", "scale_vaapi=format=nv12")
+		vf = append(vf, "scale_vaapi="+size+"format=nv12")
+	default:
+		cpuScale()
 	}
 	enc := p.Encoder
+	var ea []string
 	switch {
 	case enc == "libx264":
-		a = append(a, "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-profile:v", "baseline", "-pix_fmt", "yuv420p")
+		ea = []string{"-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-profile:v", "baseline", "-pix_fmt", "yuv420p"}
 	case strings.HasSuffix(enc, "_nvenc"):
-		a = append(a, "-c:v", enc, "-preset", "p1", "-tune", "ull", "-zerolatency", "1", "-bf", "0")
+		ea = []string{"-c:v", enc, "-preset", "p1", "-tune", "ull", "-zerolatency", "1", "-bf", "0"}
 		if p.HWAccel != "cuda" {
-			a = append(a, "-pix_fmt", "yuv420p")
+			ea = append(ea, "-pix_fmt", "yuv420p")
 		}
 	case strings.HasSuffix(enc, "_qsv"):
-		a = append(a, "-pix_fmt", "nv12", "-c:v", enc, "-preset", "veryfast", "-bf", "0", "-async_depth", "1")
+		ea = []string{"-pix_fmt", "nv12", "-c:v", enc, "-preset", "veryfast", "-bf", "0", "-async_depth", "1"}
 	case strings.HasSuffix(enc, "_vaapi"):
 		if p.HWAccel != "vaapi" {
-			a = append(a, "-vaapi_device", vaapiDevice(p.Device), "-vf", "format=nv12,hwupload")
+			a = append(a, "-vaapi_device", vaapiDevice(p.Device))
+			vf = append(vf, "format=nv12", "hwupload")
 		}
-		a = append(a, "-c:v", enc, "-bf", "0")
+		ea = []string{"-c:v", enc, "-bf", "0"}
 	case strings.HasSuffix(enc, "_amf"):
-		a = append(a, "-c:v", enc, "-usage", "ultralowlatency", "-bf", "0", "-pix_fmt", "nv12")
+		ea = []string{"-c:v", enc, "-usage", "ultralowlatency", "-bf", "0", "-pix_fmt", "nv12"}
 	default:
-		a = append(a, "-c:v", enc, "-bf", "0")
+		ea = []string{"-c:v", enc, "-bf", "0"}
 	}
+	if len(vf) > 0 {
+		a = append(a, "-vf", strings.Join(vf, ","))
+	}
+	a = append(a, ea...)
 	return append(a, "-g", "50", "-keyint_min", "25", "-sc_threshold", "0")
 }
 

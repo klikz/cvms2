@@ -430,7 +430,9 @@
       const hasSub = !!(cam.sub && cam.sub.available);
       const codec = hasSub ? cam.sub.codec : cam.main.codec;
       badges.append(hasSub
-        ? el("span", { class: "badge badge-codec", title: t("grid.stream_sub") }, "SUB")
+        ? (cam.sub.virtual
+          ? el("span", { class: "badge badge-codec", title: t("grid.virtual_sub") }, "SUB*")
+          : el("span", { class: "badge badge-codec", title: t("grid.stream_sub") }, "SUB"))
         : el("span", { class: "badge badge-codec stream-main", title: t("grid.no_sub") }, "MAIN"));
       if (codec) badges.append(el("span", { class: "badge badge-codec" }, codec.toUpperCase()));
       const star = el("button", { class: "tile-star" + (S.favs.has(cam.id) ? " on" : ""), type: "button", title: t("fav.toggle"), draggable: "false" }, icon("star"));
@@ -1028,6 +1030,7 @@
         el("div", { class: "card-body" }, el("dl", { class: "kv" },
           el("dt", null, t("settings.version")), el("dd", { class: "mono" }, info.version || S.me.version),
           el("dt", null, t("settings.pipeline")), el("dd", null, info.pipeline ? el("span", { class: "badge " + (info.pipeline.hwaccel ? "badge-ok" : "badge-warn") }, info.pipeline.name) : "—"),
+          el("dt", null, t("settings.h265_passthrough")), el("dd", null, el("span", { class: "badge " + (info.h265_passthrough === false ? "badge-warn" : "badge-ok") }, t(info.h265_passthrough === false ? "settings.passthrough_off" : "settings.passthrough_on"))),
           el("dt", null, t("settings.h265_fallback")), el("dd", null, t("settings.fallback_" + (info.h265_fallback || "server"))),
           el("dt", null, t("settings.live")), el("dd", null, info.live ? t("settings.live_value", { s: info.live.streams, v: info.live.viewers, t: info.live.transcodes, c: info.live.clients_connected }) : "—"),
           el("dt", null, t("settings.client_url")), el("dd", { class: "mono" }, location.protocol + "//" + location.host),

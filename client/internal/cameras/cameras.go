@@ -270,11 +270,16 @@ func reachable(ctx context.Context, addr string) error {
 
 // Info converts the config into protocol camera info for the server.
 func (m *Manager) Info() []protocol.CameraInfo {
-	cams := m.store.Get().Cameras
+	cfg := m.store.Get()
+	cams := cfg.Cameras
 	out := make([]protocol.CameraInfo, 0, len(cams))
 	for _, c := range cams {
 		if !c.Enabled {
 			continue
+		}
+		sub := protocol.StreamInfo{Available: c.Sub.URL != "", Codec: c.Sub.Codec, Width: c.Sub.Width, Height: c.Sub.Height}
+		if c.VirtualSub(cfg.SubFromMain) {
+			sub = protocol.StreamInfo{Available: true, Codec: protocol.CodecH264, Width: config.VirtualSubWidth, Height: config.VirtualSubHeight, Virtual: true}
 		}
 		out = append(out, protocol.CameraInfo{
 			ID:     c.ID,
@@ -283,7 +288,7 @@ func (m *Manager) Info() []protocol.CameraInfo {
 			Model:  strings.TrimSpace(c.Manufacturer + " " + c.Model),
 			Online: m.Online(c.ID),
 			Main:   protocol.StreamInfo{Available: c.Main.URL != "", Codec: c.Main.Codec, Width: c.Main.Width, Height: c.Main.Height},
-			Sub:    protocol.StreamInfo{Available: c.Sub.URL != "", Codec: c.Sub.Codec, Width: c.Sub.Width, Height: c.Sub.Height},
+			Sub:    sub,
 		})
 	}
 	return out
@@ -395,7 +400,14 @@ func (m *Manager) Snapshot(ctx context.Context, id, profile string, maxAge time.
 		cancel()
 	}
 	if st.SnapshotURL == "" || c.err != nil {
-		c.data, c.err = m.grab(u, profile == protocol.ProfileMain, st.Codec)
+		maxW := 0 // sub: as is
+		switch {
+		case profile == protocol.ProfileMain:
+			maxW = 1920
+		case cam.VirtualSub(m.store.Get().SubFromMain):
+			maxW = config.VirtualSubWidth // sub made from main: keep it small
+		}
+		c.data, c.err = m.grab(u, maxW, st.Codec)
 	}
 
 	m.mu.Lock()
@@ -417,10 +429,10 @@ func (m *Manager) Pipeline() ffmpegx.Pipeline {
 	return ffmpegx.PickPipeline(m.ffmpeg, c.HWAccel, c.H264Encoder, c.GPUDevice)
 }
 
-// grab runs ffmpeg to capture one frame as JPEG. At most
-// snapshot_concurrency grabs run at once. Large (main) H.265 frames are
-// decoded on the GPU when one is available.
-func (m *Manager) grab(rtspURL string, main bool, codec string) ([]byte, error) {
+// grab runs ffmpeg to capture one frame as JPEG, scaled down to maxW
+// (0 = source size). At most snapshot_concurrency grabs run at once. Large
+// (main) H.265 frames are decoded on the GPU when one is available.
+func (m *Manager) grab(rtspURL string, maxW int, codec string) ([]byte, error) {
 	if rtspURL == "" {
 		return nil, errors.New("no stream url")
 	}
@@ -429,13 +441,12 @@ func (m *Manager) grab(rtspURL string, main bool, codec string) ([]byte, error) 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin"}
-	if main && codec == protocol.CodecH265 {
+	if maxW > 0 && codec == protocol.CodecH265 {
 		args = append(args, m.Pipeline().DecodeInputArgs()...)
 	}
-	limit := main
 	args = append(args, "-rtsp_transport", "tcp", "-timeout", "8000000", "-i", rtspURL, "-frames:v", "1", "-an")
-	if limit {
-		args = append(args, "-vf", "scale='min(1920,iw)':-2")
+	if maxW > 0 {
+		args = append(args, "-vf", fmt.Sprintf("scale='min(%d,iw)':-2", maxW))
 	}
 	args = append(args, "-q:v", "4", "-f", "image2", "-c:v", "mjpeg", "pipe:1")
 	cmd := exec.CommandContext(ctx, m.ffmpeg, args...)
