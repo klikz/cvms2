@@ -88,6 +88,10 @@ func (s *Server) Handler() http.Handler {
 			r.Get("/events", s.handleEvents)
 			r.Post("/activity", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, okResp) })
 
+			r.Get("/favorites", s.handleFavorites)
+			r.Put("/favorites/{id}", s.handleFavoriteSet)
+			r.Delete("/favorites/{id}", s.handleFavoriteSet)
+
 			r.Get("/layouts", s.handleLayouts)
 			r.Post("/layouts", s.handleLayoutSave)
 			r.Put("/layouts/{id}", s.handleLayoutSave)
