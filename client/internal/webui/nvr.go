@@ -9,36 +9,37 @@ import (
 	"sync"
 	"time"
 
-	"cvms/client/internal/hikvision"
+	"cvms/client/internal/nvr"
 )
 
-// ---------------------------------------------------------------- Hikvision NVR
+// ---------------------------------------------------------------- NVR (Hikvision, Dahua)
 
 type nvrReq struct {
 	Host     string `json:"host"`
 	Port     int    `json:"port"`
 	Username string `json:"username"`
 	Password string `json:"password"`
+	// Vendor: auto | hikvision | dahua
+	Vendor string `json:"vendor"`
 }
 
-func (q *nvrReq) client() *hikvision.Client {
-	return hikvision.NewClient(strings.TrimSpace(q.Host), q.Port, strings.TrimSpace(q.Username), q.Password)
-}
+func (q *nvrReq) host() string { return strings.TrimSpace(q.Host) }
+func (q *nvrReq) user() string { return strings.TrimSpace(q.Username) }
 
 func nvrCode(err error) string {
 	switch {
-	case errors.Is(err, hikvision.ErrAuth):
+	case errors.Is(err, nvr.ErrAuth):
 		return "nvr_auth"
-	case errors.Is(err, hikvision.ErrUnreachable), errors.Is(err, context.DeadlineExceeded):
+	case errors.Is(err, nvr.ErrUnreachable), errors.Is(err, context.DeadlineExceeded):
 		return "nvr_unreachable"
-	case errors.Is(err, hikvision.ErrNotHikvision):
-		return "nvr_not_hikvision"
+	case errors.Is(err, nvr.ErrUnsupported):
+		return "nvr_unsupported"
 	}
 	return "nvr_failed"
 }
 
 type nvrChannelDTO struct {
-	hikvision.Channel
+	nvr.Channel
 	AddedNVR    bool `json:"added_nvr"`
 	AddedDirect bool `json:"added_direct"`
 }
@@ -52,14 +53,13 @@ func (s *Server) handleNVRChannels(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 	defer cancel()
-	c := req.client()
-	chs, err := c.Channels(ctx)
+	rec, chs, err := nvr.Open(ctx, req.Vendor, req.host(), req.Port, req.user(), req.Password)
 	if err != nil {
 		apiError(w, http.StatusBadGateway, nvrCode(err), err.Error())
 		return
 	}
-	dev, _ := c.DeviceInfo(ctx)
-	rtspPort := c.RTSPPort(ctx)
+	dev, _ := rec.DeviceInfo(ctx)
+	rtspPort := rec.RTSPPort(ctx)
 
 	urls, hosts := map[string]bool{}, map[string]bool{}
 	for _, cam := range s.store.Get().Cameras {
@@ -70,11 +70,11 @@ func (s *Server) handleNVRChannels(w http.ResponseWriter, r *http.Request) {
 	for _, ch := range chs {
 		out = append(out, nvrChannelDTO{
 			Channel:     ch,
-			AddedNVR:    urls[hikvision.MainURL(c.Host, rtspPort, ch.ID)],
+			AddedNVR:    urls[rec.MainURL(rtspPort, ch.ID)],
 			AddedDirect: ch.IP != "" && hosts[ch.IP],
 		})
 	}
-	writeJSON(w, map[string]any{"device": dev, "rtsp_port": rtspPort, "channels": out})
+	writeJSON(w, map[string]any{"vendor": rec.Vendor(), "device": dev, "rtsp_port": rtspPort, "channels": out})
 }
 
 type nvrChannelReq struct {
@@ -104,7 +104,12 @@ func (s *Server) handleNVRAdd(w http.ResponseWriter, r *http.Request) {
 	if req.Mode != "direct" {
 		req.Mode = "nvr"
 	}
-	host := strings.TrimSpace(req.Host)
+	host := req.host()
+	rec, err := nvr.New(req.Vendor, host, req.Port, req.user(), req.Password)
+	if err != nil {
+		apiError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
 	results := make([]bulkResult, len(req.Channels))
 	sem := make(chan struct{}, 4)
 	var wg sync.WaitGroup
@@ -122,7 +127,7 @@ func (s *Server) handleNVRAdd(w http.ResponseWriter, r *http.Request) {
 			if req.Mode == "direct" {
 				res = s.nvrDirect(r.Context(), ch, name, req.CamUsername, req.CamPassword)
 			} else {
-				res = s.nvrThrough(r.Context(), host, req.Port, req.RTSPPort, ch.ID, name, req.Username, req.Password, req.Model)
+				res = s.nvrThrough(r.Context(), rec, req.RTSPPort, ch.ID, name, req.user(), req.Password, req.Model)
 			}
 			res.Host, res.Port = host, ch.ID
 			results[i] = res
@@ -143,15 +148,15 @@ func (s *Server) handleNVRAdd(w http.ResponseWriter, r *http.Request) {
 
 // nvrThrough saves a channel whose streams come from the recorder. ONVIFPort
 // stays 0 so many channels of one NVR do not collide in onvifAdded.
-func (s *Server) nvrThrough(ctx context.Context, host string, httpPort, rtspPort, ch int, name, user, pass, model string) bulkResult {
+func (s *Server) nvrThrough(ctx context.Context, rec nvr.Recorder, rtspPort, ch int, name, user, pass, model string) bulkResult {
 	var res bulkResult
 	p := pass
 	cam, probeErr, err := s.saveCamera(ctx, "", cameraReq{
-		Name: name, Host: host, Username: strings.TrimSpace(user), Password: &p,
-		Manufacturer: "Hikvision", Model: model,
-		MainURL:      hikvision.MainURL(host, rtspPort, ch),
-		SubURL:       hikvision.SubURL(host, rtspPort, ch),
-		MainSnapshot: hikvision.SnapshotURL(host, httpPort, ch),
+		Name: name, Host: rec.Host(), Username: user, Password: &p,
+		Manufacturer: vendorName[rec.Vendor()], Model: model,
+		MainURL:      rec.MainURL(rtspPort, ch),
+		SubURL:       rec.SubURL(rtspPort, ch),
+		MainSnapshot: rec.SnapshotURL(ch),
 	})
 	if err != nil {
 		var se *saveError
@@ -164,6 +169,8 @@ func (s *Server) nvrThrough(ctx context.Context, host string, httpPort, rtspPort
 	res.OK, res.CameraID, res.Name, res.Warning, res.Via = true, cam.ID, cam.Name, probeErr, "nvr"
 	return res
 }
+
+var vendorName = map[string]string{nvr.Hikvision: "Hikvision", nvr.Dahua: "Dahua"}
 
 // nvrDirect adds the camera behind a channel by its own address.
 func (s *Server) nvrDirect(ctx context.Context, ch nvrChannelReq, name, user, pass string) bulkResult {

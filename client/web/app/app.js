@@ -674,12 +674,16 @@
     });
   }
 
-  /* ================================================================ Hikvision NVR */
-  /* Reads the NVR channel list over ISAPI and adds the checked channels.
+  /* ================================================================ NVR (Hikvision, Dahua) */
+  /* Reads the NVR channel list (Hikvision ISAPI / Dahua CGI) and adds the checked channels.
    * One mode applies to all of them: through the NVR or straight to each camera. */
   function nvrDialog(opts) {
     opts = opts || {};
     const f = {
+      vendor: el("select", { class: "select" },
+        el("option", { value: "auto" }, t("add.nvr_vendor_auto")),
+        el("option", { value: "hikvision" }, "Hikvision"),
+        el("option", { value: "dahua" }, "Dahua")),
       host: el("input", { class: "input", placeholder: "192.168.1.100" }),
       port: el("input", { class: "input", type: "number", value: 80, min: "1", max: "65535" }),
       user: el("input", { class: "input", value: opts.user !== undefined ? opts.user : "admin", autocomplete: "off" }),
@@ -688,7 +692,7 @@
       camUser: el("input", { class: "input", autocomplete: "off" }),
       camPass: el("input", { class: "input", type: "password", autocomplete: "new-password" }),
     };
-    const N = { dev: null, host: "", port: 80, chans: [], mode: "nvr", camCredsTouched: false, busy: false };
+    const N = { dev: null, vendor: "", host: "", port: 80, chans: [], mode: "nvr", camCredsTouched: false, busy: false };
     const fetchBtn = btn({ label: t("add.nvr_fetch"), icon: "search", kind: "primary", onClick: fetchChannels });
     f.host.addEventListener("keydown", (e) => { if (e.key === "Enter") fetchChannels(); });
     const listBox = el("div");
@@ -743,6 +747,7 @@
       addBtn.disabled = n === 0 || N.busy;
       const head = el("div", { class: "row", style: { margin: "16px 0 8px", gap: "8px" } },
         el("span", { class: "badge badge-ok" }, t("add.connected")),
+        el("span", { class: "badge" }, N.vendor === "dahua" ? "Dahua" : "Hikvision"),
         el("b", null, [N.dev.name, N.dev.model].filter(Boolean).join(" · ") || N.host),
         el("span", { class: "muted", style: { fontSize: "12px" } }, t("add.nvr_channels", { n: N.chans.length })));
       if (!N.chans.length) { listBox.append(head, CVMS.emptyState("camera", t("add.nvr_no_channels"), "")); return; }
@@ -772,8 +777,8 @@
       modeBox.style.display = "none";
       CVMS.clear(listBox).append(el("div", { class: "row muted", style: { margin: "16px 0" } }, el("div", { class: "spinner" }), t("add.connecting")));
       try {
-        const r = await api("/api/nvr/channels", { method: "POST", body: { host, port: +f.port.value || 80, username: f.user.value, password: f.pass.value } });
-        N.dev = r.device || {}; N.host = host; N.port = +f.port.value || 80;
+        const r = await api("/api/nvr/channels", { method: "POST", body: { vendor: f.vendor.value, host, port: +f.port.value || 80, username: f.user.value, password: f.pass.value } });
+        N.dev = r.device || {}; N.vendor = r.vendor; N.host = host; N.port = +f.port.value || 80;
         f.rtsp.value = r.rtsp_port || 554;
         N.chans = (r.channels || []).map((c) => Object.assign(c, { status: "", error: "", selected: false }));
         N.chans.forEach((c) => { c.selected = selectable(c) && c.online; });
@@ -793,7 +798,7 @@
       renderList();
       try {
         const res = await api("/api/nvr/add", { method: "POST", body: {
-          host: N.host, port: N.port, username: f.user.value, password: f.pass.value, rtsp_port: +f.rtsp.value || 554,
+          vendor: N.vendor, host: N.host, port: N.port, username: f.user.value, password: f.pass.value, rtsp_port: +f.rtsp.value || 554,
           mode: N.mode, cam_username: f.camUser.value, cam_password: f.camPass.value,
           device_name: N.dev.name || "", model: N.dev.model || "",
           channels: targets.map((c) => ({ id: c.id, name: c.name, ip: c.ip || "" })),
@@ -821,7 +826,7 @@
       wide: true,
       body: el("div", null,
         el("p", { class: "muted", style: { fontSize: "12px", margin: "0 0 12px" } }, t("add.nvr_sub")),
-        el("div", { class: "form-row" }, CVMS.field(t("add.ip"), f.host), CVMS.field(t("add.http_port"), f.port)),
+        el("div", { class: "form-row" }, CVMS.field(t("add.nvr_vendor"), f.vendor), CVMS.field(t("add.ip"), f.host), CVMS.field(t("add.http_port"), f.port)),
         el("div", { class: "form-row" }, CVMS.field(t("auth.username"), f.user), CVMS.field(t("auth.password"), f.pass)),
         fetchBtn, listBox, modeBox),
       actions: [{ label: t("common.close") }],

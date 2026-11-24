@@ -1,4 +1,4 @@
-package hikvision
+package nvr
 
 import (
 	"context"
@@ -18,8 +18,9 @@ const (
 	nonce = "abc123"
 )
 
-// fakeNVR answers ISAPI paths with Digest (MD5, no qop) auth.
-func fakeNVR(t *testing.T, user, pass string, pages map[string]string) *Client {
+// fakeServer answers paths (with query) using Digest (MD5, no qop) auth and
+// returns its host and port.
+func fakeServer(t *testing.T, user, pass string, pages map[string]string) (string, int) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := r.Header.Get("Authorization")
@@ -29,7 +30,7 @@ func fakeNVR(t *testing.T, user, pass string, pages map[string]string) *Client {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		body, ok := pages[r.URL.Path]
+		body, ok := pages[r.URL.RequestURI()]
 		if !ok {
 			http.NotFound(w, r)
 			return
@@ -40,7 +41,14 @@ func fakeNVR(t *testing.T, user, pass string, pages map[string]string) *Client {
 	t.Cleanup(srv.Close)
 	host, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
 	p, _ := strconv.Atoi(port)
-	return NewClient(host, p, user, pass)
+	return host, p
+}
+
+func fakeNVR(t *testing.T, user, pass string, pages map[string]string) *hikvision {
+	t.Helper()
+	host, port := fakeServer(t, user, pass, pages)
+	r, _ := New(Hikvision, host, port, user, pass)
+	return r.(*hikvision)
 }
 
 const ns = `xmlns="http://www.hikvision.com/ver20/XMLSchema" version="2.0"`
@@ -65,7 +73,7 @@ var nvrPages = map[string]string{
 </AdminAccessProtocolList>`,
 }
 
-func TestNVR(t *testing.T) {
+func TestHikvisionNVR(t *testing.T) {
 	c := fakeNVR(t, "admin", "secret", nvrPages)
 	ctx := context.Background()
 
@@ -91,7 +99,7 @@ func TestNVR(t *testing.T) {
 	}
 }
 
-func TestDVRAnalog(t *testing.T) {
+func TestHikvisionDVRAnalog(t *testing.T) {
 	pages := map[string]string{
 		"/ISAPI/System/Video/inputs/channels": `<VideoInputChannelList ` + ns + `>
  <VideoInputChannel><id>1</id><inputPort>1</inputPort><videoInputEnabled>true</videoInputEnabled><name>Camera 01</name></VideoInputChannel>
@@ -107,16 +115,17 @@ func TestDVRAnalog(t *testing.T) {
 	}
 }
 
-func TestErrors(t *testing.T) {
+func TestHikvisionErrors(t *testing.T) {
 	c := fakeNVR(t, "admin", "secret", nvrPages)
-	c.Pass = "wrong"
+	c.pass = "wrong"
 	if _, err := c.Channels(context.Background()); !errors.Is(err, ErrAuth) {
 		t.Errorf("wrong password: %v", err)
 	}
-	if _, err := fakeNVR(t, "a", "b", map[string]string{}).Channels(context.Background()); !errors.Is(err, ErrNotHikvision) {
+	if _, err := fakeNVR(t, "a", "b", map[string]string{}).Channels(context.Background()); !errors.Is(err, ErrUnsupported) {
 		t.Errorf("no ISAPI: %v", err)
 	}
-	if _, err := NewClient("127.0.0.1", 1, "a", "b").DeviceInfo(context.Background()); !errors.Is(err, ErrUnreachable) {
+	closed, _ := New(Hikvision, "127.0.0.1", 1, "a", "b")
+	if _, err := closed.DeviceInfo(context.Background()); !errors.Is(err, ErrUnreachable) {
 		t.Errorf("closed port: %v", err)
 	}
 	if p := fakeNVR(t, "a", "b", map[string]string{}).RTSPPort(context.Background()); p != DefaultRTSPPort {
@@ -124,14 +133,15 @@ func TestErrors(t *testing.T) {
 	}
 }
 
-func TestURLs(t *testing.T) {
-	if u := MainURL("10.0.0.5", 554, 3); u != "rtsp://10.0.0.5:554/Streaming/Channels/301" {
+func TestHikvisionURLs(t *testing.T) {
+	r, _ := New(Hikvision, "10.0.0.5", 8080, "", "")
+	if u := r.MainURL(554, 3); u != "rtsp://10.0.0.5:554/Streaming/Channels/301" {
 		t.Error(u)
 	}
-	if u := SubURL("10.0.0.5", 0, 12); u != "rtsp://10.0.0.5:554/Streaming/Channels/1202" {
+	if u := r.SubURL(0, 12); u != "rtsp://10.0.0.5:554/Streaming/Channels/1202" {
 		t.Error(u)
 	}
-	if u := SnapshotURL("10.0.0.5", 8080, 2); u != "http://10.0.0.5:8080/ISAPI/Streaming/channels/201/picture" {
+	if u := r.SnapshotURL(2); u != "http://10.0.0.5:8080/ISAPI/Streaming/channels/201/picture" {
 		t.Error(u)
 	}
 }
