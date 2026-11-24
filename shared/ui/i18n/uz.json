@@ -84,6 +84,8 @@
   "grid.empty_text": "Ko'rsatish uchun kamera topilmadi.",
   "grid.empty_layout": "Bu ko'rinishga hali kamera qo'shilmagan.",
   "grid.dblclick": "Asosiy oqimni ko'rish uchun 2 marta bosing",
+  "grid.stream_sub": "Grid sub stream (kichik oqim) orqali ko'rsatilmoqda",
+  "grid.no_sub": "Sub stream sozlanmagan — grid'da main stream ishlatilmoqda (ko'proq trafik)",
   "grid.auto": "Avto",
   "grid.client_sub": "Kameralardan olingan rasmlar",
   "grid.refresh_every": "Har {n} soniyada yangilanadi",

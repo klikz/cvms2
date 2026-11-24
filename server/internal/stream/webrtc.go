@@ -132,14 +132,30 @@ func (w *WebRTC) Answer(offer string, h *hub.Hub, v *hub.Viewer, onEnd func()) (
 	var endOnce sync.Once
 	finish := func() { endOnce.Do(func() { close(end) }) }
 	connected := make(chan struct{}, 1)
+	var (
+		graceMu sync.Mutex
+		grace   *time.Timer
+	)
 	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
+		graceMu.Lock()
+		defer graceMu.Unlock()
+		if grace != nil && s != webrtc.PeerConnectionStateDisconnected {
+			grace.Stop()
+			grace = nil
+		}
 		switch s {
 		case webrtc.PeerConnectionStateConnected:
 			select {
 			case connected <- struct{}{}:
 			default:
 			}
-		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed, webrtc.PeerConnectionStateDisconnected:
+		case webrtc.PeerConnectionStateDisconnected:
+			// often transient (packet loss, Wi-Fi hiccup): ICE may recover,
+			// so give it time before tearing the session down
+			if grace == nil {
+				grace = time.AfterFunc(10*time.Second, finish)
+			}
+		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
 			finish()
 		}
 	})

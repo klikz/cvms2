@@ -30,6 +30,8 @@ type Manager struct {
 	mu       sync.Mutex
 	online   map[string]bool
 	checked  map[string]time.Time
+	fails    map[string]int       // consecutive failed reachability checks
+	alive    map[string]time.Time // last proof of life from a running stream
 	snaps    map[string]snap
 	inflight map[string]*call
 	onChange func(id string, online bool)
@@ -58,6 +60,8 @@ func New(store *config.Store) *Manager {
 		probe:    ffmpegx.Probe(ff),
 		online:   map[string]bool{},
 		checked:  map[string]time.Time{},
+		fails:    map[string]int{},
+		alive:    map[string]time.Time{},
 		snaps:    map[string]snap{},
 		inflight: map[string]*call{},
 		kick:     make(chan struct{}, 1),
@@ -105,22 +109,60 @@ func (m *Manager) Run(ctx context.Context) {
 	}
 }
 
+// offlineAfter is how many consecutive failed checks mark a camera offline.
+// A single failed dial is common (busy camera, NVR refusing parallel
+// connections, packet loss) and must not flap the camera in the UI.
+const offlineAfter = 3
+
 func (m *Manager) checkAll(ctx context.Context) {
 	cams := m.store.Get().Cameras
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 16)
+	interval := time.Duration(m.store.Get().StatusInterval) * time.Second
+
+	// Cameras behind one NVR share host:port: dial each address once and
+	// apply the result to all of them, instead of hitting the NVR with many
+	// parallel connections that it may refuse.
+	addrs := map[string]error{}
 	for _, c := range cams {
-		c := c
+		if c.Enabled {
+			if a := rtspAddr(c); a != "" {
+				addrs[a] = nil
+			}
+		}
+	}
+	var (
+		wg  sync.WaitGroup
+		rmu sync.Mutex
+		sem = make(chan struct{}, 16)
+	)
+	for a := range addrs {
+		a := a
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			ok := c.Enabled && reachable(ctx, c)
-			m.setOnline(c.ID, ok)
+			err := reachable(ctx, a)
+			rmu.Lock()
+			addrs[a] = err
+			rmu.Unlock()
 		}()
 	}
 	wg.Wait()
+	if ctx.Err() != nil {
+		return
+	}
+
+	for _, c := range cams {
+		switch a := rtspAddr(c); {
+		case !c.Enabled:
+			m.applyCheck(c, false, errors.New("disabled"), true, interval)
+		case a == "":
+			m.applyCheck(c, false, errors.New("invalid stream url"), true, interval)
+		default:
+			err := addrs[a]
+			m.applyCheck(c, err == nil, err, false, interval)
+		}
+	}
 	// forget removed cameras
 	m.mu.Lock()
 	ids := map[string]bool{}
@@ -130,9 +172,41 @@ func (m *Manager) checkAll(ctx context.Context) {
 	for id := range m.online {
 		if !ids[id] {
 			delete(m.online, id)
+			delete(m.fails, id)
+			delete(m.alive, id)
 		}
 	}
 	m.mu.Unlock()
+}
+
+// applyCheck records one reachability result. A camera goes online on the
+// first success but offline only after offlineAfter consecutive failures
+// (or at once when final, e.g. disabled). A camera whose stream delivered
+// frames recently is kept online.
+func (m *Manager) applyCheck(c config.Camera, ok bool, err error, final bool, interval time.Duration) {
+	if ok {
+		m.setOnline(c.ID, true)
+		return
+	}
+	m.mu.Lock()
+	prev, known := m.online[c.ID]
+	if !final && time.Since(m.alive[c.ID]) < 2*interval {
+		// the stream is pushing frames: the dial failure is not real
+		m.fails[c.ID] = 0
+		m.checked[c.ID] = time.Now()
+		m.mu.Unlock()
+		return
+	}
+	m.fails[c.ID]++
+	n := m.fails[c.ID]
+	m.mu.Unlock()
+	if !final && known && prev && n < offlineAfter {
+		return
+	}
+	if known && prev && err != nil {
+		log.Printf("camera %s offline: %v", c.Name, err)
+	}
+	m.setOnline(c.ID, false)
 }
 
 func (m *Manager) setOnline(id string, ok bool) {
@@ -140,29 +214,55 @@ func (m *Manager) setOnline(id string, ok bool) {
 	prev, known := m.online[id]
 	m.online[id] = ok
 	m.checked[id] = time.Now()
+	if ok {
+		m.fails[id] = 0
+	}
 	m.mu.Unlock()
 	if (!known || prev != ok) && m.onChange != nil {
 		m.onChange(id, ok)
 	}
 }
 
-// reachable dials the RTSP port of the main stream.
-func reachable(ctx context.Context, c config.Camera) bool {
+// MarkAlive records that the camera is delivering video right now.
+func (m *Manager) MarkAlive(id string) {
+	m.mu.Lock()
+	m.alive[id] = time.Now()
+	m.mu.Unlock()
+	m.setOnline(id, true)
+}
+
+// rtspAddr returns host:port of the main stream, or "".
+func rtspAddr(c config.Camera) string {
 	u, err := url.Parse(c.Main.URL)
 	if err != nil || u.Hostname() == "" {
-		return false
+		return ""
 	}
 	port := u.Port()
 	if port == "" {
 		port = "554"
 	}
-	d := net.Dialer{Timeout: 3 * time.Second}
-	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(u.Hostname(), port))
-	if err != nil {
-		return false
+	return net.JoinHostPort(u.Hostname(), port)
+}
+
+// reachable dials the RTSP port, retrying once after a short pause.
+func reachable(ctx context.Context, addr string) error {
+	d := net.Dialer{Timeout: 5 * time.Second}
+	var err error
+	for i := 0; i < 2; i++ {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Second):
+			}
+		}
+		var conn net.Conn
+		if conn, err = d.DialContext(ctx, "tcp", addr); err == nil {
+			conn.Close()
+			return nil
+		}
 	}
-	conn.Close()
-	return true
+	return err
 }
 
 // Info converts the config into protocol camera info for the server.

@@ -8,6 +8,10 @@
 .tile[draggable="true"] { cursor: grab; }
 .tile.dragging { opacity: .4; }
 .tile .tile-badges .badge.loc { font-family: var(--font); }
+.tile .tile-badges .badge.stream-main { color: var(--warn); }
+/* grid tiles are 16:9; stretch other aspect ratios (4:3, 5:4) to fill the
+   tile instead of leaving black bars. The double-click viewer keeps contain. */
+.cam-grid .tile > video, .cam-grid .tile > img { object-fit: fill; }
 
 .idle-overlay { position: fixed; inset: 0; z-index: 950; background: var(--overlay); display: grid; place-items: center; backdrop-filter: blur(3px); animation: fade var(--t-med) var(--ease); }
 .idle-card { text-align: center; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-xl); padding: var(--sp-6) var(--sp-8); box-shadow: var(--shadow-lg); max-width: 360px; }

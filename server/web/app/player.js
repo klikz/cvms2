@@ -56,6 +56,7 @@
     }
 
     setState(kind, text) {
+      this.kind = kind;
       CVMS.clear(this.state);
       if (kind === "loading") this.state.append(el("div", null, el("div", { class: "spinner" }), el("div", null, text || t("player.connecting"))));
       else if (kind === "error") this.state.append(el("div", null, text));
@@ -132,10 +133,21 @@
         this.video.srcObject = ev.streams[0] || new MediaStream([ev.track]);
         this.video.play().catch(() => {});
       };
+      let graceTimer = null;
       pc.onconnectionstatechange = () => {
         if (gen !== this.gen) return;
         const s = pc.connectionState;
+        clearTimeout(graceTimer);
         if (s === "connected") { connected = true; setPreferMSE(false); this.watchFrames(gen); }
+        if (s === "disconnected" && connected) {
+          // usually transient: ICE often recovers within a few seconds
+          graceTimer = setTimeout(() => {
+            if (gen !== this.gen || pc.connectionState === "connected") return;
+            this.setState("loading", t("player.reconnecting"));
+            this.retry(500);
+          }, 5000);
+          return;
+        }
         if (s === "failed" || s === "disconnected" || s === "closed") {
           if (!connected) { setPreferMSE(true); this.retry(200, "mse"); }
           else { this.setState("loading", t("player.reconnecting")); this.retry(2000); }

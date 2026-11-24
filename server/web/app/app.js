@@ -389,6 +389,9 @@
           if (!old) return;
           if (old.dataset.online !== String(!!k.online)) {
             const p = players.get(k.id);
+            // video still arrives: an offline status report is stale, keep
+            // the running player (it shows its own error if frames stop)
+            if (!k.online && p && p.kind === "playing") return;
             if (p) { p.destroy(); players.delete(k.id); }
             const nt = tile(k);
             old.replaceWith(nt);
@@ -424,7 +427,11 @@
       const n = el("div", { class: "tile" + (cam.online ? "" : " offline"), "data-id": cam.id, "data-online": String(!!cam.online), draggable: "true", title: cam.client.name + " · " + cam.name + "\n" + t("grid.dblclick") },
         el("div", { class: "tile-bar" }, el("span", { class: "dot " + (cam.online ? "ok" : "off") }), name, badges));
       if (cam.location) badges.append(el("span", { class: "badge loc" }, cam.location));
-      const codec = cam.sub && cam.sub.available ? cam.sub.codec : cam.main.codec;
+      const hasSub = !!(cam.sub && cam.sub.available);
+      const codec = hasSub ? cam.sub.codec : cam.main.codec;
+      badges.append(hasSub
+        ? el("span", { class: "badge badge-codec", title: t("grid.stream_sub") }, "SUB")
+        : el("span", { class: "badge badge-codec stream-main", title: t("grid.no_sub") }, "MAIN"));
       if (codec) badges.append(el("span", { class: "badge badge-codec" }, codec.toUpperCase()));
       const star = el("button", { class: "tile-star" + (S.favs.has(cam.id) ? " on" : ""), type: "button", title: t("fav.toggle"), draggable: "false" }, icon("star"));
       star.addEventListener("click", (e) => { e.stopPropagation(); toggleFav(cam, star); });

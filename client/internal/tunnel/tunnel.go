@@ -429,10 +429,17 @@ func (t *Tunnel) pushStream(ctx context.Context, c *conn, m protocol.StreamStart
 
 	r := media.NewAUReader(stdout, outCodec)
 	needKey := true
+	var lastAlive time.Time
 	for {
 		au, err := r.Next()
 		if err != nil {
 			break
+		}
+		if time.Since(lastAlive) > 10*time.Second {
+			// video is flowing: keep the camera online even if a status
+			// check dial fails meanwhile
+			lastAlive = time.Now()
+			t.cams.MarkAlive(cam.ID)
 		}
 		key := media.IsKeyframe(outCodec, au)
 		if needKey && !key {
