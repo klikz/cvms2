@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -114,11 +115,15 @@ func run(ctx context.Context, dir string) error {
 	ui.SetService(spec)
 	go ui.EnsureAutostart()
 	addr := store.Get().UI.Listen
-	hs := &http.Server{Addr: addr, Handler: ui.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("web UI cannot listen on %s: %w; the port may be busy: change \"ui.listen\" in %s and restart", addr, err, store.Path())
+	}
+	hs := &http.Server{Handler: ui.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)
 	go func() {
 		log.Printf("web UI: http://%s", addr)
-		if err := hs.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := hs.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errc <- err
 		}
 		close(errc)

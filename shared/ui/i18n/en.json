@@ -305,6 +305,7 @@
   "err.last_admin": "At least one administrator is required",
   "err.self_delete": "You cannot delete yourself",
   "err.bad_listen": "Address must be host:port",
+  "err.port_busy": "Port is already in use — choose another",
   "err.bad_rtsp_url": "Link must start with rtsp://",
   "err.camera_exists": "This camera is already added",
   "err.onvif_auth": "ONVIF rejected the login. Hikvision may need a separate ONVIF user (Configuration → Network → Integration Protocol). Also check the camera clock.",

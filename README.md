@@ -80,6 +80,10 @@ Ubuntu'da `sudo` bilan. Config fayllar exe yonida (yoki `-dir <papka>`).
 | WebRTC media | UDP 8189, TCP 8189 | `webrtc.udp_port`, `webrtc.tcp_port` |
 | Client web UI | TCP 8081 (faqat 127.0.0.1) | `ui.listen` |
 
+Barcha portlar config fayl (`config.yaml`) orqali o'zgartiriladi. Port band bo'lsa dastur ishga
+tushmaydi va qaysi kalitni qaysi faylda o'zgartirish kerakligini logga yozadi; qiymatni almashtirib,
+qayta ishga tushiring. Client UI portini web UI'dagi sozlamalardan ham o'zgartirish mumkin (band port qabul qilinmaydi).
+
 Client serverga o'zi ulanadi (chiquvchi WebSocket) — client tomonda port ochish shart emas.
 Server NAT ortida bo'lsa `webrtc.public_ips` ga tashqi IP'ni yozing. UDP yopiq tarmoqlarda brauzer
 avtomatik WebSocket (MSE) orqali ko'rsatishga o'tadi.

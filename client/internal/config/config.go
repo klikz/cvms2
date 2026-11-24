@@ -116,6 +116,7 @@ type Store struct {
 const header = `# CVMS client configuration.
 # Created automatically. Camera passwords are encrypted with client.key.
 # Edit while the client is stopped, or use the web UI.
+# Port: ui.listen ("host:port") - local web UI; change it if the port is already in use.
 `
 
 // Load reads path or creates a default file. created is true for a new file.

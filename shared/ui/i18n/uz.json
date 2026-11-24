@@ -305,6 +305,7 @@
   "err.last_admin": "Kamida bitta administrator qolishi kerak",
   "err.self_delete": "O'zingizni o'chira olmaysiz",
   "err.bad_listen": "Manzil host:port ko'rinishida bo'lishi kerak",
+  "err.port_busy": "Port band — boshqasini tanlang",
   "err.bad_rtsp_url": "Havola rtsp:// bilan boshlanishi kerak",
   "err.camera_exists": "Bu kamera allaqachon qo'shilgan",
   "err.onvif_auth": "ONVIF login/parolni qabul qilmadi. Hikvision'da ONVIF uchun alohida foydalanuvchi kerak bo'lishi mumkin (Sozlamalar → Tarmoq → Integratsiya protokoli). Kamera vaqtini ham tekshiring.",

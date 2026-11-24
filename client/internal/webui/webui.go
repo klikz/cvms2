@@ -336,6 +336,14 @@ func (s *Server) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 			apiError(w, http.StatusBadRequest, "bad_listen", "invalid listen address (host:port)")
 			return
 		}
+		if d.UIListen != s.store.Get().UI.Listen {
+			ln, err := net.Listen("tcp", d.UIListen)
+			if err != nil {
+				apiError(w, http.StatusConflict, "port_busy", "port is already in use: "+d.UIListen)
+				return
+			}
+			ln.Close()
+		}
 	}
 	var serverChanged, nameChanged, restart bool
 	err := s.store.Update(func(c *config.Config) error {

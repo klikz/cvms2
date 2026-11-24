@@ -60,11 +60,13 @@ func NewWebRTC(cfg config.WebRTC) (*WebRTC, error) {
 	}
 	se := webrtc.SettingEngine{}
 	nets := []webrtc.NetworkType{}
+	var udpMux ice.UDPMux
 	if cfg.UDPPort > 0 {
 		mux, err := ice.NewMultiUDPMuxFromPort(cfg.UDPPort)
 		if err != nil {
 			return nil, fmt.Errorf("webrtc udp port %d: %w", cfg.UDPPort, err)
 		}
+		udpMux = mux
 		se.SetICEUDPMux(mux)
 		nets = append(nets, webrtc.NetworkTypeUDP4, webrtc.NetworkTypeUDP6)
 	} else {
@@ -73,6 +75,9 @@ func NewWebRTC(cfg config.WebRTC) (*WebRTC, error) {
 	if cfg.TCPPort > 0 {
 		ln, err := net.ListenTCP("tcp", &net.TCPAddr{Port: cfg.TCPPort})
 		if err != nil {
+			if udpMux != nil {
+				udpMux.Close()
+			}
 			return nil, fmt.Errorf("webrtc tcp port %d: %w", cfg.TCPPort, err)
 		}
 		se.SetICETCPMux(webrtc.NewICETCPMux(nil, ln, 8))

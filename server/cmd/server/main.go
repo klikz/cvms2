@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -101,6 +102,7 @@ func run(ctx context.Context, cfgPath string) error {
 	rtc, err := stream.NewWebRTC(cfg.WebRTC)
 	if err != nil {
 		log.Printf("WARNING: WebRTC disabled: %v (browsers will use the WebSocket fallback)", err)
+		log.Printf("WARNING: if the port is busy, change \"webrtc.udp_port\" / \"webrtc.tcp_port\" in %s and restart", cfg.Path())
 		rtc = nil
 	}
 
@@ -109,11 +111,15 @@ func run(ctx context.Context, cfgPath string) error {
 	go srv.RunMaintenance(ctx)
 	go srv.EnsureAutostart()
 
-	hs := &http.Server{Addr: cfg.Listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	ln, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		return fmt.Errorf("cannot listen on %s: %w; the port may be busy: change \"listen\" in %s and restart", cfg.Listen, err, cfg.Path())
+	}
+	hs := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)
 	go func() {
 		log.Printf("web UI: %s  (webrtc udp/tcp port %d/%d)", displayAddr(cfg.Listen), cfg.WebRTC.UDPPort, cfg.WebRTC.TCPPort)
-		if err := hs.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := hs.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errc <- err
 		}
 		close(errc)

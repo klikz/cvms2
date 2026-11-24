@@ -83,6 +83,10 @@ func Default() *Config {
 
 const header = `# CVMS server configuration.
 # This file was created automatically. Restart the server after editing.
+# Ports (change them here if one is already in use):
+#   listen           - web UI / API / client connections, "host:port" or ":port"
+#   webrtc.udp_port  - WebRTC media (UDP), 0 = random port
+#   webrtc.tcp_port  - WebRTC over TCP, 0 = disabled
 `
 
 // Load reads path, or writes and returns the default config when missing.
@@ -112,6 +116,12 @@ func (c *Config) fix() {
 	d := Default()
 	if c.Listen == "" {
 		c.Listen = d.Listen
+	}
+	if c.WebRTC.UDPPort < 0 || c.WebRTC.UDPPort > 65535 {
+		c.WebRTC.UDPPort = d.WebRTC.UDPPort
+	}
+	if c.WebRTC.TCPPort < 0 || c.WebRTC.TCPPort > 65535 {
+		c.WebRTC.TCPPort = d.WebRTC.TCPPort
 	}
 	if c.DBPath == "" {
 		c.DBPath = d.DBPath
