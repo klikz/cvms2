@@ -402,5 +402,9 @@
   "err.auth_failed": "Неверный логин или пароль (ONVIF и RTSP)",
   "err.rtsp_auth": "RTSP не принял логин/пароль",
   "err.rtsp_not_found": "Ни один из известных RTSP-адресов не ответил",
-  "err.rtsp_unreachable": "Порт RTSP (554) недоступен"
+  "err.rtsp_unreachable": "Порт RTSP (554) недоступен",
+  "nav.favorites": "Избранное",
+  "fav.toggle": "Добавить в избранное / убрать",
+  "fav.empty": "Нет избранных камер",
+  "fav.empty_text": "Нажмите на звёздочку на камере — она появится здесь."
 }

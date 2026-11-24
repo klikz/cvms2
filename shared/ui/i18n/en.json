@@ -402,5 +402,9 @@
   "err.auth_failed": "Wrong username or password (ONVIF and RTSP)",
   "err.rtsp_auth": "RTSP rejected the login",
   "err.rtsp_not_found": "None of the known RTSP paths answered",
-  "err.rtsp_unreachable": "RTSP port (554) is not reachable"
+  "err.rtsp_unreachable": "RTSP port (554) is not reachable",
+  "nav.favorites": "Favorites",
+  "fav.toggle": "Add to / remove from favorites",
+  "fav.empty": "No favorite cameras",
+  "fav.empty_text": "Click the star on a camera to add it here."
 }

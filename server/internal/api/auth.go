@@ -70,10 +70,6 @@ func (s *Server) authMiddleware(allowMustChange bool) func(http.Handler) http.Ha
 				apiError(w, http.StatusUnauthorized, "unauthorized", "not logged in")
 				return
 			}
-			if u.MustChange && !allowMustChange {
-				apiError(w, http.StatusForbidden, "must_change", "password change required")
-				return
-			}
 			if time.Since(last) > 30*time.Second && !strings.HasSuffix(r.URL.Path, "/events") {
 				_ = s.db.TouchSession(sess.Token)
 			}
@@ -160,7 +156,7 @@ func (s *Server) meResponse(u *db.User) map[string]any {
 		"username":            u.Username,
 		"role":                u.Role,
 		"lang":                u.Lang,
-		"must_change":         u.MustChange,
+		"must_change":         false,
 		"version":             s.version,
 		"viewer_idle_minutes": s.cfg.ViewerIdleMinutes,
 	}

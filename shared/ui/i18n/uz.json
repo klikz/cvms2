@@ -402,5 +402,9 @@
   "err.auth_failed": "Login yoki parol noto'g'ri (ONVIF va RTSP)",
   "err.rtsp_auth": "RTSP login/parolni qabul qilmadi",
   "err.rtsp_not_found": "Mashhur RTSP manzillarining hech biri javob bermadi",
-  "err.rtsp_unreachable": "RTSP porti (554) ochiq emas"
+  "err.rtsp_unreachable": "RTSP porti (554) ochiq emas",
+  "nav.favorites": "Saqlanganlar",
+  "fav.toggle": "Saqlanganlarga qo'shish / olib tashlash",
+  "fav.empty": "Saqlangan kamera yo'q",
+  "fav.empty_text": "Kamera ustidagi yulduzchani bosing — kamera shu yerga qo'shiladi."
 }

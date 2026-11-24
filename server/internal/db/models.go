@@ -532,6 +532,36 @@ func (d *DB) DeleteLayout(id, userID int64) error {
 	return err
 }
 
+// ---------------------------------------------------------------- favorites
+
+// Favorites lists the camera ids a user starred.
+func (d *DB) Favorites(userID int64) ([]int64, error) {
+	rows, err := d.Query(`SELECT camera_id FROM favorites WHERE user_id=? ORDER BY rowid`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// SetFavorite stars or unstars a camera for a user.
+func (d *DB) SetFavorite(userID, camID int64, on bool) error {
+	if on {
+		_, err := d.Exec(`INSERT OR IGNORE INTO favorites(user_id, camera_id) VALUES(?,?)`, userID, camID)
+		return err
+	}
+	_, err := d.Exec(`DELETE FROM favorites WHERE user_id=? AND camera_id=?`, userID, camID)
+	return err
+}
+
 // ---------------------------------------------------------------- audit
 
 // AuditEntry is one audit log row.

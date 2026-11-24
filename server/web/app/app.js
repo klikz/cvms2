@@ -2,7 +2,7 @@
 (function () {
   "use strict";
   const { el, t, api, btn, icon, fmt } = CVMS;
-  const S = { me: null, clients: [], cams: [], camByID: new Map(), layouts: [], cleanup: null, refresh: null, ws: null };
+  const S = { me: null, clients: [], cams: [], camByID: new Map(), layouts: [], favs: new Set(), cleanup: null, refresh: null, ws: null };
 
   /* ================================================================ boot */
   async function main() {
@@ -31,12 +31,6 @@
 
   async function afterLogin() {
     if (S.me.lang && S.me.lang !== CVMS.i18n.lang) await CVMS.i18n.load(S.me.lang);
-    if (S.me.must_change) {
-      return CVMS.passwordForm({
-        brandSub: "Server", forced: true,
-        onSubmit: async (o, n) => { S.me = await api("/api/me/password", { method: "POST", body: { old: o, new: n } }); CVMS.toast(t("auth.password_changed"), "ok"); afterLogin(); },
-      });
-    }
     CVMS.i18n.listeners.length = 0;
     CVMS.shell.mount({
       brandSub: "Server",
@@ -44,7 +38,6 @@
       user: S.me,
       nav: buildNav,
       onLogout: logout,
-      onChangePassword: changePassword,
       onLang: (lang) => { api("/api/me/lang", { method: "PUT", body: { lang } }).catch(() => {}); CVMS.router.resolve(); },
     });
     CVMS.shell.setConn("warn", t("conn.connecting"));
@@ -62,10 +55,6 @@
     showLogin();
   }
 
-  function changePassword() {
-    CVMS.passwordForm({ onSubmit: (o, n) => api("/api/me/password", { method: "POST", body: { old: o, new: n } }) });
-  }
-
   function teardownLive() {
     if (S.cleanup) { S.cleanup(); S.cleanup = null; }
     if (S.ws) { S.ws.onclose = null; S.ws.close(); S.ws = null; }
@@ -75,9 +64,10 @@
   /* ================================================================ data */
   async function refreshData() {
     try {
-      const [clients, layouts] = await Promise.all([api("/api/clients"), api("/api/layouts")]);
+      const [clients, layouts, favs] = await Promise.all([api("/api/clients"), api("/api/layouts"), api("/api/favorites")]);
       S.clients = clients || [];
       S.layouts = layouts || [];
+      S.favs = new Set(favs || []);
       S.cams = [];
       S.camByID = new Map();
       for (const c of S.clients) {
@@ -142,11 +132,7 @@
   /* ================================================================ nav */
   function buildNav() {
     const sections = [{
-      items: [
-        { href: "#/dashboard", icon: "home", label: t("nav.dashboard") },
-        { href: "#/grid", icon: "grid", label: t("nav.live") },
-        { href: "#/layouts", icon: "layout", label: t("nav.layouts"), count: S.layouts.length || null },
-      ],
+      items: [{ href: "#/favorites", icon: "star", label: t("nav.favorites"), count: S.favs.size || null }],
     }];
     const approved = S.clients.filter((c) => c.status === "approved");
     const offlineOnly = CVMS.store.get("cvms.nav.offline") === "1";
@@ -170,10 +156,10 @@
           { href: "#/admin/clients", icon: "server", label: t("nav.manage_clients"), count: pending || null, countClass: "warn" },
           { href: "#/admin/users", icon: "users", label: t("nav.users") },
           { href: "#/admin/audit", icon: "list", label: t("nav.audit") },
+          { href: "#/settings", icon: "settings", label: t("nav.settings") },
         ],
       });
     }
-    sections.push({ title: t("nav.system"), items: [{ href: "#/settings", icon: "settings", label: t("nav.settings") }] });
     return sections;
   }
 
@@ -188,21 +174,22 @@
 
   function registerRoutes() {
     const R = CVMS.router;
-    R.add("/", () => R.go("/dashboard"));
+    R.add("/", () => R.go(S.favs.size ? "/favorites" : "/grid"));
     R.add("/dashboard", dashboardPage);
     R.add("/grid", () => gridPage({ mode: "all" }));
+    R.add("/favorites", () => gridPage({ mode: "favorites" }));
     R.add("/client/:id", (p) => gridPage({ mode: "client", clientId: +p.id }));
     R.add("/layout/:id", (p) => gridPage({ mode: "layout", layoutId: +p.id }));
     R.add("/layouts", layoutsPage);
     R.add("/admin/clients", () => adminGuard(clientsPage));
     R.add("/admin/users", () => adminGuard(usersPage));
     R.add("/admin/audit", () => adminGuard(auditPage));
-    R.add("/settings", settingsPage);
-    R.fallback = () => R.go("/dashboard");
+    R.add("/settings", () => adminGuard(settingsPage));
+    R.fallback = () => R.go("/");
   }
 
   function adminGuard(fn) {
-    if (!S.me || S.me.role !== "admin") return CVMS.router.go("/dashboard");
+    if (!S.me || S.me.role !== "admin") return CVMS.router.go("/");
     fn();
   }
 
@@ -305,9 +292,10 @@
     }
     const client = opts.mode === "client" ? S.clients.find((c) => c.id === opts.clientId) : null;
     if (opts.mode === "client" && !client) return CVMS.router.go("/grid");
-    const title = layout ? layout.name : client ? client.name : t("nav.live");
+    const fav = opts.mode === "favorites";
+    const title = layout ? layout.name : client ? client.name : fav ? t("nav.favorites") : t("nav.live");
     const c = page(title, null, true);
-    const orderKey = "cvms.order." + (client ? "c" + client.id : "all");
+    const orderKey = "cvms.order." + (client ? "c" + client.id : fav ? "fav" : "all");
     const st = {
       size: layout ? layout.grid : +(CVMS.store.get("cvms.grid") || 2),
       page: 1,
@@ -323,6 +311,7 @@
     function allCams() {
       if (layout) return st.order.map((id) => S.camByID.get(id)).filter(Boolean);
       let list = client ? S.cams.filter((k) => k.client.id === client.id) : S.cams.slice();
+      if (fav) list = list.filter((k) => S.favs.has(k.id));
       if (st.client) list = list.filter((k) => k.client.id === st.client);
       if (st.loc) list = list.filter((k) => (k.location || "") === st.loc);
       if (st.q) { const q = st.q.toLowerCase(); list = list.filter((k) => k.name.toLowerCase().includes(q) || (k.location || "").toLowerCase().includes(q) || k.client.name.toLowerCase().includes(q)); }
@@ -378,8 +367,6 @@
       toolbar.append(CVMS.pager(st.page, pages, (p) => { st.page = p; render(true); }));
       if (layout) {
         toolbar.append(btn({ label: t("layout.edit_cameras"), icon: "edit", size: "sm", onClick: editLayoutCameras }));
-      } else {
-        toolbar.append(btn({ label: t("layout.save_as"), icon: "save", size: "sm", disabled: !list.length, onClick: () => saveAsLayout(list) }));
       }
       toolbar.append(btn({ icon: "maximize", size: "sm", title: t("grid.fullscreen"), onClick: () => { const n = document.getElementById("view"); if (document.fullscreenElement) document.exitFullscreen(); else if (n.requestFullscreen) n.requestFullscreen(); } }));
     }
@@ -418,7 +405,7 @@
       stopPlayers();
       CVMS.clear(area);
       if (!list.length) {
-        area.appendChild(CVMS.emptyState("camera", t("grid.empty"), layout ? t("grid.empty_layout") : t("grid.empty_text"),
+        area.appendChild(CVMS.emptyState(fav ? "star" : "camera", fav ? t("fav.empty") : t("grid.empty"), layout ? t("grid.empty_layout") : fav ? t("fav.empty_text") : t("grid.empty_text"),
           layout ? btn({ label: t("layout.edit_cameras"), icon: "edit", kind: "primary", onClick: editLayoutCameras }) : null));
         return;
       }
@@ -439,6 +426,10 @@
       if (cam.location) badges.append(el("span", { class: "badge loc" }, cam.location));
       const codec = cam.sub && cam.sub.available ? cam.sub.codec : cam.main.codec;
       if (codec) badges.append(el("span", { class: "badge badge-codec" }, codec.toUpperCase()));
+      const star = el("button", { class: "tile-star" + (S.favs.has(cam.id) ? " on" : ""), type: "button", title: t("fav.toggle"), draggable: "false" }, icon("star"));
+      star.addEventListener("click", (e) => { e.stopPropagation(); toggleFav(cam, star); });
+      star.addEventListener("dblclick", (e) => e.stopPropagation());
+      n.appendChild(star);
       n.addEventListener("dblclick", () => openViewer(cam));
       n.addEventListener("dragstart", (e) => { dragID = cam.id; n.classList.add("dragging"); e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(cam.id)); });
       n.addEventListener("dragend", () => { n.classList.remove("dragging"); area.querySelectorAll(".drag-over").forEach((x) => x.classList.remove("drag-over")); });
@@ -456,6 +447,22 @@
         n.querySelector(".tile-state svg").style.cssText = "width:22px;height:22px;margin-bottom:4px";
       }
       return n;
+    }
+
+    async function toggleFav(cam, star) {
+      const on = !S.favs.has(cam.id);
+      if (on) S.favs.add(cam.id); else S.favs.delete(cam.id);
+      star.classList.toggle("on", on);
+      CVMS.shell.renderNav();
+      try {
+        await api("/api/favorites/" + cam.id, { method: on ? "PUT" : "DELETE" });
+        if (fav && !on) render(true);
+      } catch (e) {
+        if (on) S.favs.delete(cam.id); else S.favs.add(cam.id);
+        star.classList.toggle("on", !on);
+        CVMS.shell.renderNav();
+        CVMS.err(e);
+      }
     }
 
     function swap(a, b) {
@@ -477,7 +484,7 @@
 
     function openViewer(cam) {
       players.forEach((p) => p.stop());
-      const body = el("div", { class: "viewer-body" });
+      const body = el("div", { class: "viewer-body live" });
       const badges = el("div", { class: "row" });
       const close = () => {
         p.destroy(); v.remove(); document.removeEventListener("keydown", onKey); viewer = null;
@@ -829,7 +836,7 @@
           el("td", null, el("div", { class: "row" }, el("span", { class: "avatar" }, u.username.slice(0, 2)), el("b", null, u.username), u.id === S.me.id ? el("span", { class: "badge" }, t("users.you")) : null)),
           el("td", null, el("span", { class: "badge " + (u.role === "admin" ? "badge-info" : "") }, t("role." + u.role))),
           el("td", null, u.disabled ? el("span", { class: "badge badge-danger badge-dot" }, t("users.disabled")) : el("span", { class: "badge badge-ok badge-dot" }, t("users.active")),
-            u.must_change ? el("span", { class: "badge badge-warn", style: { marginLeft: "4px" } }, t("users.must_change")) : null),
+            ),
           el("td", null, u.role === "admin" ? el("span", { class: "muted" }, t("users.all_clients")) :
             u.clients.length ? el("div", { class: "chip-list" }, u.clients.slice(0, 4).map((id) => el("span", { class: "badge" }, name(id))), u.clients.length > 4 ? el("span", { class: "badge" }, "+" + (u.clients.length - 4)) : null) :
               el("span", { class: "dim" }, t("users.no_clients"))),
@@ -844,7 +851,6 @@
       const isNew = !u;
       const uname = el("input", { class: "input", value: u ? u.username : "", disabled: !isNew, autocomplete: "off", maxlength: "32" });
       const pw = el("input", { class: "input", type: "password", autocomplete: "new-password", placeholder: isNew ? "" : t("users.pw_keep") });
-      const must = el("input", { type: "checkbox", checked: isNew ? true : false });
       const role = el("select", { class: "select" }, ["user", "admin"].map((r) => el("option", { value: r, selected: (u ? u.role : "user") === r }, t("role." + r))));
       const disabled = el("input", { type: "checkbox", checked: u ? u.disabled : false });
       const chosen = new Set(u ? u.clients : []);
@@ -875,12 +881,11 @@
         body: el("div", null,
           el("div", { class: "form-row" }, CVMS.field(t("auth.username"), uname), CVMS.field(t("users.role"), role)),
           CVMS.field(isNew ? t("auth.password") : t("users.new_password"), pw, t("auth.password_hint")),
-          el("div", { class: "field" }, el("label", { class: "check" }, must, t("users.force_change"))),
           !isNew ? el("div", { class: "field" }, el("label", { class: "check" }, disabled, t("users.disable"))) : null,
           permBox),
         actions: [{ label: t("common.cancel") }, {
           label: isNew ? t("common.create") : t("common.save"), kind: "primary", onClick: async () => {
-            const body = { username: uname.value.trim(), password: pw.value, role: role.value, disabled: disabled.checked, must_change: must.checked, clients: role.value === "admin" ? [] : [...chosen] };
+            const body = { username: uname.value.trim(), password: pw.value, role: role.value, disabled: disabled.checked, clients: role.value === "admin" ? [] : [...chosen] };
             if (isNew) await api("/api/users", { method: "POST", body });
             else await api("/api/users/" + u.id, { method: "PUT", body });
             CVMS.toast(t("users.saved"), "ok");
@@ -976,7 +981,7 @@
         el("div", { class: "card-body" },
           el("dl", { class: "kv" }, el("dt", null, t("auth.username")), el("dd", null, S.me.username), el("dt", null, t("users.role")), el("dd", null, t("role." + S.me.role))),
           el("div", { style: { maxWidth: "320px", marginTop: "16px" } }, CVMS.field(t("common.language"), lang)),
-          btn({ label: t("auth.change_password"), icon: "key", onClick: changePassword }))));
+          )));
     if (S.me.role === "admin") {
       let info = {};
       try { info = await api("/api/info"); } catch (e) { /* ignore */ }

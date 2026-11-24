@@ -372,6 +372,29 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ---------------------------------------------------------------- favorites
+
+func (s *Server) handleFavorites(w http.ResponseWriter, r *http.Request) {
+	ids, err := s.db.Favorites(userFrom(r).ID)
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	writeJSON(w, ids)
+}
+
+func (s *Server) handleFavoriteSet(w http.ResponseWriter, r *http.Request) {
+	cam := s.camera(w, r)
+	if cam == nil {
+		return
+	}
+	if err := s.db.SetFavorite(userFrom(r).ID, cam.ID, r.Method == http.MethodPut); err != nil {
+		internalError(w, err)
+		return
+	}
+	writeJSON(w, okResp)
+}
+
 // ---------------------------------------------------------------- layouts
 
 func (s *Server) handleLayouts(w http.ResponseWriter, r *http.Request) {
@@ -468,7 +491,7 @@ func (s *Server) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		internalError(w, err)
 		return
 	}
-	u := &db.User{Username: req.Username, PasswordHash: h, Role: req.Role, Disabled: req.Disabled, MustChange: req.MustChange}
+	u := &db.User{Username: req.Username, PasswordHash: h, Role: req.Role, Disabled: req.Disabled}
 	if err := s.db.CreateUser(u); err != nil {
 		if errors.Is(err, db.ErrExists) {
 			apiError(w, http.StatusConflict, "user_exists", "username already exists")
@@ -530,7 +553,7 @@ func (s *Server) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		u.PasswordHash = h
-		u.MustChange = req.MustChange
+		u.MustChange = false
 		changes = append(changes, "password reset")
 	}
 	if err := s.db.UpdateUser(u); err != nil {
