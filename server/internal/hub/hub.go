@@ -440,11 +440,19 @@ func (h *Hub) HandleClientWS(w http.ResponseWriter, r *http.Request, ip string, 
 	go c.writer()
 
 	if cl.Status == protocol.StatusApproved && hello.Token != cl.Token {
+		// The client lost or never received its token (config reset,
+		// disconnect/reconnect, reinstall). Rejecting forever would leave it
+		// stuck; instead drop the approval and ask the admin to approve again.
 		audit("client_unauthorized", cl.Name, ip)
-		c.sendJSON(protocol.TypeStatus, protocol.Status{Status: protocol.StatusUnauthorized, Message: "invalid token"})
-		time.AfterFunc(time.Second, c.close)
-		<-c.done
-		return
+		log.Printf("client %s presented an invalid token; approval reset to pending", cl.Name)
+		if err := h.db.SetClientStatus(cl.ID, protocol.StatusPending, ""); err != nil {
+			log.Printf("reset client status: %v", err)
+			c.close()
+			return
+		}
+		cl.Status, cl.Token = protocol.StatusPending, ""
+		c.status = protocol.StatusPending
+		h.Events.PublishDebounced("clients")
 	}
 	c.sendJSON(protocol.TypeStatus, protocol.Status{Status: cl.Status})
 
