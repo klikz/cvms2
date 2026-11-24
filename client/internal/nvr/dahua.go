@@ -107,8 +107,11 @@ func (d *dahua) Channels(ctx context.Context) ([]Channel, error) {
 
 	cams, camErr := d.kv(ctx, "/cgi-bin/LogicDeviceManager.cgi?action=getCameraAll")
 	if camErr == nil {
-		online := map[int]bool{}
+		// some firmware has no getCameraState (501): the state is then
+		// unknown and an enabled channel counts as online
+		var online map[int]bool
 		if st, err := d.kv(ctx, "/cgi-bin/LogicDeviceManager.cgi?action=getCameraState&uniqueChannels[0]=-1"); err == nil {
+			online = map[int]bool{}
 			for _, f := range indexed(st, reState) {
 				if ch, err := strconv.Atoi(f["channel"]); err == nil {
 					online[ch] = strings.EqualFold(f["connectionState"], "Connected")
@@ -118,22 +121,34 @@ func (d *dahua) Channels(ctx context.Context) ([]Channel, error) {
 		var out []Channel
 		seen := map[int]bool{}
 		for _, f := range indexed(cams, reCamera) {
-			ch, err := strconv.Atoi(f["Channel"])
+			// UniqueChannel is the recorder's channel; on many firmwares
+			// Channel is the input on the remote camera (0 for all of them)
+			ch, err := strconv.Atoi(firstNonEmpty(f["UniqueChannel"], f["Channel"]))
 			if err != nil || ch < 0 || seen[ch] {
 				continue
 			}
-			seen[ch] = true
 			local := strings.EqualFold(f["Type"], "Local")
-			addr := f["DeviceInfo.Address"]
-			// unconfigured remote channels have no address and are off
-			if !local && addr == "" && !strings.EqualFold(f["Enable"], "true") {
+			// Compose and other virtual channels have no camera of their own
+			if !local && !strings.EqualFold(f["Type"], "Remote") {
 				continue
+			}
+			addr := f["DeviceInfo.Address"]
+			enabled := strings.EqualFold(f["Enable"], "true")
+			// unconfigured remote channels are off (their address is empty
+			// or a placeholder like 192.168.0.0)
+			if !local && !enabled {
+				continue
+			}
+			seen[ch] = true
+			isOnline := local || enabled
+			if online != nil && !local {
+				isOnline = online[ch]
 			}
 			c := Channel{
 				ID:     ch + 1,
 				Name:   firstNonEmpty(titles[ch], f["DeviceInfo.VideoInputs[0].Name"], f["DeviceInfo.Name"]),
 				Analog: local,
-				Online: local || online[ch],
+				Online: isOnline,
 			}
 			if !local {
 				c.IP = addr

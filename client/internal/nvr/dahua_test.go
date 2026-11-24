@@ -55,6 +55,38 @@ func TestDahuaNVR(t *testing.T) {
 	}
 }
 
+// DHI-NVR5432-4KS2: Channel is 0 on every camera, the recorder channel is
+// UniqueChannel; no getCameraState (501); placeholder and Compose entries.
+func TestDahuaUniqueChannel(t *testing.T) {
+	host, port := fakeServer(t, "admin", "pw", map[string]string{
+		"/cgi-bin/configManager.cgi?action=getConfig&name=ChannelTitle": "table.ChannelTitle[0].Name=IPC\r\n" +
+			"table.ChannelTitle[1].Name=AKFA\r\ntable.ChannelTitle[2].Name=KPP\r\ntable.ChannelTitle[3].Name=Channel4\r\n",
+		"/cgi-bin/LogicDeviceManager.cgi?action=getCameraAll": "" +
+			"camera[0].UniqueChannel=0\r\ncamera[0].Enable=true\r\ncamera[0].Type=Remote\r\ncamera[0].Channel=0\r\ncamera[0].DeviceInfo.Address=10.10.10.39\r\ncamera[0].DeviceInfo.HttpPort=80\r\n" +
+			"camera[1].UniqueChannel=1\r\ncamera[1].Enable=true\r\ncamera[1].Type=Remote\r\ncamera[1].Channel=0\r\ncamera[1].DeviceInfo.Address=10.10.10.12\r\ncamera[1].DeviceInfo.HttpPort=80\r\n" +
+			"camera[2].UniqueChannel=2\r\ncamera[2].Enable=true\r\ncamera[2].Type=Remote\r\ncamera[2].Channel=0\r\ncamera[2].DeviceInfo.Address=10.10.10.13\r\ncamera[2].DeviceInfo.HttpPort=80\r\n" +
+			"camera[3].UniqueChannel=3\r\ncamera[3].Enable=false\r\ncamera[3].Type=Remote\r\ncamera[3].Channel=0\r\ncamera[3].DeviceInfo.Address=192.168.0.0\r\n" +
+			"camera[4].Channel=66\r\ncamera[4].UniqueChannel=66\r\ncamera[4].Type=Compose\r\n",
+	})
+	_, chs, err := Open(context.Background(), Dahua, host, port, "admin", "pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Channel{
+		{ID: 1, Name: "IPC", IP: "10.10.10.39", Port: 80, Online: true},
+		{ID: 2, Name: "AKFA", IP: "10.10.10.12", Port: 80, Online: true},
+		{ID: 3, Name: "KPP", IP: "10.10.10.13", Port: 80, Online: true},
+	}
+	if len(chs) != len(want) {
+		t.Fatalf("channels = %+v", chs)
+	}
+	for i := range want {
+		if chs[i] != want[i] {
+			t.Errorf("channel %d = %+v, want %+v", i, chs[i], want[i])
+		}
+	}
+}
+
 func TestDahuaFallback(t *testing.T) {
 	host, port := fakeServer(t, "admin", "pw", map[string]string{
 		"/cgi-bin/configManager.cgi?action=getConfig&name=ChannelTitle": "table.ChannelTitle[0].Name=Cam 1\r\ntable.ChannelTitle[1].Name=Cam 2\r\n",
