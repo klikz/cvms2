@@ -14,6 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"cvms/client/internal/secret"
+	"cvms/client/internal/streamurl"
 	"cvms/shared/protocol"
 )
 
@@ -180,6 +181,9 @@ func Load(path string, box *secret.Box) (s *Store, created bool, err error) {
 		if c.Password != "" && !secret.IsEncrypted(c.Password) {
 			dirty = true // plain text typed by hand: encrypt on save
 		}
+		if NormalizeCamera(c) {
+			dirty = true // repair URLs saved by older versions
+		}
 		p, err := box.Decrypt(c.Password)
 		if err != nil {
 			return nil, false, fmt.Errorf("camera %q password: %w", c.Name, err)
@@ -210,7 +214,25 @@ func (s *Store) Update(fn func(c *Config) error) error {
 	if err := fn(s.cfg); err != nil {
 		return err
 	}
+	// Every camera write goes through here, whatever added it (manual,
+	// ONVIF, NVR import, server): never persist a broken stream URL.
+	for i := range s.cfg.Cameras {
+		NormalizeCamera(&s.cfg.Cameras[i])
+	}
 	return s.save()
+}
+
+// NormalizeCamera repairs malformed stream and snapshot URLs (for example
+// "rtsp://host:80:554/..." reported by some firmwares). It reports whether
+// anything changed.
+func NormalizeCamera(c *Camera) bool {
+	changed := false
+	for _, p := range []*string{&c.Main.URL, &c.Sub.URL, &c.Main.SnapshotURL, &c.Sub.SnapshotURL} {
+		if v, ok := streamurl.Normalize(*p); ok {
+			*p, changed = v, true
+		}
+	}
+	return changed
 }
 
 // Camera returns a camera by id.

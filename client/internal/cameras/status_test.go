@@ -88,3 +88,10 @@ func TestApplyCheckUnknownFailsAtOnce(t *testing.T) {
 		t.Fatalf("unknown camera: online=%v changes=%v", m.Online("a"), changes)
 	}
 }
+
+func TestRTSPAddrDoublePort(t *testing.T) {
+	c := config.Camera{Main: config.Stream{URL: "rtsp://u:p@10.10.10.40:80:554/cam/realmonitor?channel=1"}}
+	if a := rtspAddr(c); a != "10.10.10.40:554" {
+		t.Fatalf("rtspAddr = %q", a)
+	}
+}

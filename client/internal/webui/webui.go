@@ -26,6 +26,7 @@ import (
 	"cvms/client/internal/cameras"
 	"cvms/client/internal/config"
 	"cvms/client/internal/onvif"
+	"cvms/client/internal/streamurl"
 	"cvms/client/internal/tunnel"
 	"cvms/shared/ffmpegx"
 	"cvms/shared/loginlimit"
@@ -507,8 +508,10 @@ func (s *Server) saveCamera(ctx context.Context, id string, req cameraReq) (conf
 	} else if id == "" {
 		cam.Enabled = true
 	}
-	mainURL, user, pass := splitCreds(strings.TrimSpace(req.MainURL))
-	subURL, _, _ := splitCreds(strings.TrimSpace(req.SubURL))
+	rawMain, _ := streamurl.Normalize(req.MainURL)
+	rawSub, _ := streamurl.Normalize(req.SubURL)
+	mainURL, user, pass := splitCreds(rawMain)
+	subURL, _, _ := splitCreds(rawSub)
 	if user != "" && cam.Username == "" {
 		cam.Username, cam.Password = user, pass
 	}
@@ -541,6 +544,7 @@ func (s *Server) saveCamera(ctx context.Context, id string, req cameraReq) (conf
 	if cam.Name == "" {
 		cam.Name = cam.Host
 	}
+	config.NormalizeCamera(&cam)
 	// detect codecs (best effort, short timeout)
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()

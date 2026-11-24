@@ -113,3 +113,25 @@ func TestProbeWrongPassword(t *testing.T) {
 		})
 	}
 }
+
+func TestNewClientOmitsDefaultPort(t *testing.T) {
+	if u := NewClient("10.0.0.5", 80, "", "").DeviceURL; u != "http://10.0.0.5/onvif/device_service" {
+		t.Fatal(u)
+	}
+	if u := NewClient("fe80::1", 80, "", "").DeviceURL; u != "http://[fe80::1]/onvif/device_service" {
+		t.Fatal(u)
+	}
+	if u := NewClient("10.0.0.5", 8080, "", "").DeviceURL; u != "http://10.0.0.5:8080/onvif/device_service" {
+		t.Fatal(u)
+	}
+}
+
+func TestFixHostRepairsDoublePort(t *testing.T) {
+	c := NewClient("10.10.10.40", 80, "", "")
+	if got := c.fixHost("rtsp://10.10.10.40:80:554/cam/realmonitor?channel=1&subtype=1"); got != "rtsp://10.10.10.40:554/cam/realmonitor?channel=1&subtype=1" {
+		t.Fatal(got)
+	}
+	if got := c.fixHost("http://192.168.1.10:80/onvif/media_service"); got != "http://10.10.10.40/onvif/media_service" {
+		t.Fatal(got)
+	}
+}

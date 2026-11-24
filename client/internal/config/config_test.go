@@ -55,3 +55,37 @@ func TestWithCredentials(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestBrokenStreamURLRepaired(t *testing.T) {
+	dir := t.TempDir()
+	box, err := secret.Open(filepath.Join(dir, "client.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config.yaml")
+	yml := "client_uid: x\ncameras:\n  - id: a\n    name: cam\n    main:\n      url: rtsp://10.0.0.5:80:554/cam/realmonitor?channel=1&subtype=0\n    sub:\n      url: rtsp://10.0.0.5:554/sub\n"
+	if err := os.WriteFile(path, []byte(yml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, _, err := Load(path, box)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cam, _ := s.Camera("a")
+	if cam.Main.URL != "rtsp://10.0.0.5:554/cam/realmonitor?channel=1&subtype=0" || cam.Sub.URL != "rtsp://10.0.0.5:554/sub" {
+		t.Fatalf("not repaired on load: %+v", cam)
+	}
+	if raw, _ := os.ReadFile(path); strings.Contains(string(raw), ":80:554") {
+		t.Fatalf("repair not saved:\n%s", raw)
+	}
+	// any write path must normalize too
+	if err := s.Update(func(c *Config) error {
+		c.Cameras = append(c.Cameras, Camera{ID: "b", Main: Stream{URL: "rtsp://u:p@10.0.0.6:80:554/s"}})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cam, _ := s.Camera("b"); cam.Main.URL != "rtsp://u:p@10.0.0.6:554/s" {
+		t.Fatalf("not repaired on update: %s", cam.Main.URL)
+	}
+}

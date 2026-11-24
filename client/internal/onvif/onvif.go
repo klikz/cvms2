@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"cvms/client/internal/digest"
+	"cvms/client/internal/streamurl"
 )
 
 // ---------------------------------------------------------------- tiny XML tree
@@ -274,8 +275,17 @@ func NewClient(host string, port int, user, pass string) *Client {
 	if port == 0 {
 		port = 80
 	}
+	// Leave the default port out of the URL: some firmwares (Dahua) build
+	// stream URIs from the Host header and would answer "host:80:554".
+	addr := net.JoinHostPort(host, fmt.Sprint(port))
+	if port == 80 {
+		addr = host
+		if strings.Contains(host, ":") {
+			addr = "[" + host + "]"
+		}
+	}
 	return &Client{
-		DeviceURL: fmt.Sprintf("http://%s/onvif/device_service", net.JoinHostPort(host, fmt.Sprint(port))),
+		DeviceURL: "http://" + addr + "/onvif/device_service",
 		Username:  user,
 		Password:  pass,
 		http:      &http.Client{Timeout: 8 * time.Second},
@@ -555,6 +565,7 @@ func (c *Client) Probe(ctx context.Context) (*Info, error) {
 // fixHost replaces the host of a device-reported URL with the address we
 // used to reach the device (cameras behind NAT often report internal IPs).
 func (c *Client) fixHost(raw string) string {
+	raw, _ = streamurl.Normalize(raw) // "host:80:554" from Host-header-echoing firmwares
 	u, err := url.Parse(raw)
 	if err != nil {
 		return raw
@@ -564,6 +575,9 @@ func (c *Client) fixHost(raw string) string {
 		return raw
 	}
 	port := u.Port()
+	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
+		port = "" // default port: keep it out of the Host header (see NewClient)
+	}
 	if port == "" {
 		u.Host = d.Hostname()
 	} else {

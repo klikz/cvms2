@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"cvms/client/internal/config"
+	"cvms/client/internal/streamurl"
 	"cvms/shared/ffmpegx"
 	"cvms/shared/protocol"
 )
@@ -157,7 +158,8 @@ func (m *Manager) checkAll(ctx context.Context) {
 		case !c.Enabled:
 			m.applyCheck(c, false, errors.New("disabled"), true, interval)
 		case a == "":
-			m.applyCheck(c, false, errors.New("invalid stream url"), true, interval)
+			// not final: if ffmpeg still plays the URL the camera stays online
+			m.applyCheck(c, false, errors.New("invalid stream url"), false, interval)
 		default:
 			err := addrs[a]
 			m.applyCheck(c, err == nil, err, false, interval)
@@ -233,7 +235,8 @@ func (m *Manager) MarkAlive(id string) {
 
 // rtspAddr returns host:port of the main stream, or "".
 func rtspAddr(c config.Camera) string {
-	u, err := url.Parse(c.Main.URL)
+	raw, _ := streamurl.Normalize(c.Main.URL)
+	u, err := url.Parse(raw)
 	if err != nil || u.Hostname() == "" {
 		return ""
 	}
