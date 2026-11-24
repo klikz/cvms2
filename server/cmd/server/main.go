@@ -61,10 +61,13 @@ func main() {
 		}
 		return
 	}
-	svc.Main("cvms-server", "CVMS Server", "Central Video Management System server", *dir, cmd, func(ctx context.Context) error {
+	spec = svc.Spec{Name: "cvms-server", Display: "CVMS Server", Description: "Central Video Management System server", Dir: *dir}
+	svc.Main(spec.Name, spec.Display, spec.Description, *dir, cmd, func(ctx context.Context) error {
 		return run(ctx, *cfgPath)
 	})
 }
+
+var spec svc.Spec
 
 func openDB(cfgPath string) (*config.Config, *db.DB, error) {
 	cfg, created, err := config.Load(cfgPath)
@@ -102,7 +105,9 @@ func run(ctx context.Context, cfgPath string) error {
 	}
 
 	srv := api.New(cfg, d, h, rtc, web.FS(), version)
+	srv.SetService(spec)
 	go srv.RunMaintenance(ctx)
+	go srv.EnsureAutostart()
 
 	hs := &http.Server{Addr: cfg.Listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)

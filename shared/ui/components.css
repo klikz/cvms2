@@ -59,6 +59,23 @@
 .input-search svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); width: 15px; height: 15px; color: var(--text-3); pointer-events: none; }
 .input-search .input { padding-left: 32px; }
 
+/* ---------- switch ---------- */
+.switch { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch-track { position: relative; width: 38px; height: 22px; border-radius: var(--r-full); background: var(--surface-3); border: 1px solid var(--border-strong); transition: background var(--t-fast), border-color var(--t-fast); flex: none; }
+.switch-thumb { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--text-2); transition: transform var(--t-med) var(--ease), background var(--t-fast); }
+.switch input:checked + .switch-track { background: var(--accent); border-color: var(--accent); }
+.switch input:checked + .switch-track .switch-thumb { transform: translateX(16px); background: #fff; }
+.switch input:focus-visible + .switch-track { box-shadow: 0 0 0 3px var(--accent-ring); }
+.switch.disabled { cursor: not-allowed; opacity: .55; }
+.switch-label { font-weight: 500; }
+
+/* ---------- notices ---------- */
+.notice { display: flex; gap: 10px; padding: 10px 14px; border-radius: var(--r-md); background: var(--warn-soft); color: var(--warn); font-size: var(--fs-sm); margin-bottom: var(--sp-4); align-items: flex-start; }
+.notice svg { width: 16px; height: 16px; flex: none; margin-top: 1px; }
+.notice.info { background: var(--accent-soft); color: var(--accent); }
+.notice.danger { background: var(--danger-soft); color: var(--danger); }
+
 /* ---------- cards ---------- */
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg); }
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); padding: var(--sp-4) var(--sp-4) 0; }

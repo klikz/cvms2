@@ -734,7 +734,8 @@
         el("div", { class: "card-body" },
           el("div", { class: "form-row" }, CVMS.field(t("settings.ui_listen"), f.listen, t("settings.ui_listen_hint")), CVMS.field(t("settings.session_idle"), f.idle, t("settings.minutes"))),
           btn({ label: t("auth.change_password"), icon: "key", onClick: changePassword }))),
-      el("div", { style: { marginTop: "16px" } }, btn({ label: t("common.save"), icon: "save", kind: "primary", size: "lg", onClick: save })));
+      el("div", { style: { marginTop: "16px" } }, btn({ label: t("common.save"), icon: "save", kind: "primary", size: "lg", onClick: save })),
+      el("div", { style: { marginTop: "16px" } }, CVMS.autostartCard()));
 
     async function save() {
       try {

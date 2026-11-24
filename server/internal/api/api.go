@@ -23,6 +23,7 @@ import (
 	"cvms/server/internal/stream"
 	"cvms/shared/loginlimit"
 	"cvms/shared/protocol"
+	"cvms/shared/svc"
 )
 
 // Server holds API dependencies.
@@ -35,6 +36,7 @@ type Server struct {
 	web     fs.FS
 	version string
 	auditCh chan *db.AuditEntry
+	spec    svc.Spec
 }
 
 // New creates the API server.
@@ -105,6 +107,8 @@ func (s *Server) Handler() http.Handler {
 				r.Delete("/users/{id}", s.handleUserDelete)
 
 				r.Get("/audit", s.handleAudit)
+				r.Get("/autostart", s.handleAutostart)
+				r.Put("/autostart", s.handleAutostartSet)
 			})
 		})
 	})

@@ -990,6 +990,7 @@
           el("dt", null, t("settings.client_url")), el("dd", { class: "mono" }, location.protocol + "//" + location.host),
           el("dt", null, t("settings.idle")), el("dd", null, S.me.viewer_idle_minutes ? t("time.minutes", { n: S.me.viewer_idle_minutes }) : "—")),
           el("p", { class: "muted", style: { margin: "14px 0 0", fontSize: "12px" } }, t("settings.config_hint")))));
+      c.append(CVMS.autostartCard());
     }
   }
 

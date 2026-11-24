@@ -26,6 +26,19 @@ func Dir() string {
 	return wd
 }
 
+// IsDev reports whether the program runs via `go run` (binary in a temp
+// build folder), where installing it as a service makes no sense.
+func IsDev() bool {
+	exe, err := os.Executable()
+	if err != nil {
+		return true
+	}
+	if r, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = r
+	}
+	return isTemp(filepath.Dir(exe))
+}
+
 func isTemp(d string) bool {
 	if strings.Contains(d, "go-build") {
 		return true

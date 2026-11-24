@@ -73,9 +73,11 @@ type Config struct {
 	// asks for H.264): auto | cuda | qsv | vaapi | d3d11va | none.
 	HWAccel string `yaml:"hwaccel"`
 	// GPUDevice selects a GPU when there are several.
-	GPUDevice   string   `yaml:"gpu_device"`
-	H264Encoder string   `yaml:"h264_encoder"`
-	Cameras     []Camera `yaml:"cameras"`
+	GPUDevice   string `yaml:"gpu_device"`
+	H264Encoder string `yaml:"h264_encoder"`
+	// Autostart installs the client as an OS service that starts at boot.
+	Autostart bool     `yaml:"autostart"`
+	Cameras   []Camera `yaml:"cameras"`
 }
 
 func defaults() *Config {
@@ -89,6 +91,7 @@ func defaults() *Config {
 		SnapshotConcurrency: 4,
 		HWAccel:             "auto",
 		H264Encoder:         "auto",
+		Autostart:           true,
 		Cameras:             []Camera{},
 	}
 }

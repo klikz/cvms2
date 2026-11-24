@@ -63,10 +63,13 @@ func main() {
 		fmt.Printf("web UI password reset. username: %s  password: %s\n", store.Get().UI.Username, pw)
 		return
 	}
-	svc.Main("cvms-client", "CVMS Client", "Central Video Management System client", *dir, cmd, func(ctx context.Context) error {
+	spec = svc.Spec{Name: "cvms-client", Display: "CVMS Client", Description: "Central Video Management System client", Dir: *dir}
+	svc.Main(spec.Name, spec.Display, spec.Description, *dir, cmd, func(ctx context.Context) error {
 		return run(ctx, *dir)
 	})
 }
+
+var spec svc.Spec
 
 func load(dir string) (*config.Store, error) {
 	box, err := secret.Open(filepath.Join(dir, "client.key"))
@@ -108,6 +111,8 @@ func run(ctx context.Context, dir string) error {
 	go tun.Run(ctx)
 
 	ui := webui.New(store, cams, tun, web.FS(), version)
+	ui.SetService(spec)
+	go ui.EnsureAutostart()
 	addr := store.Get().UI.Listen
 	hs := &http.Server{Addr: addr, Handler: ui.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)

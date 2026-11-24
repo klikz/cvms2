@@ -27,6 +27,11 @@ cvms/
 | `make runWin` | ishga tushirish (Windows) |
 | `make buildWin` | Windows uchun build → `builds/cvms-<app>-<versiya>-windows-amd64.exe` |
 | `make test` / `make vet` | testlar / tekshiruv |
+| `make update` | butun loyihani GitHub'dan yangilash (`git pull`) |
+| `make push` | butun loyihadagi o'zgarishlarni commit + push (`make push m="izoh"`) |
+
+`make update` va `make push` client/ yoki server/ ichidan ishlatiladi, lekin butun repozitoriyga
+ta'sir qiladi. Izoh berilmasa commit nomi `update v<versiya>` bo'ladi.
 
 Versiyani o'zgartirish: `VERSION` faylini tahrirlang.
 
@@ -44,6 +49,20 @@ Versiyani o'zgartirish: `VERSION` faylini tahrirlang.
 5. Serverda **Foydalanuvchilar** → oddiy userlarga qaysi clientlarni ko'rishni belgilang.
 
 Parolni unutsangiz: `cvms-server -reset-admin`, `cvms-client -reset-password`.
+
+## Avtomatik ishga tushish (autostart)
+
+Server va client sozlamalar sahifasida **Avtomatik ishga tushish** tugmasi bor (default: yoqilgan,
+`config.yaml` da `autostart: true`). Yoqilganda dastur tizim servisi sifatida o'rnatiladi va kompyuter
+yonganda o'zi ishga tushadi (Windows Service, Ubuntu'da systemd). O'chirilganda servis "qo'lda"
+rejimga o'tadi (o'chirilmaydi).
+
+- Servisni boshqarish uchun **administrator (Ubuntu'da root)** huquqi kerak. Dastur birinchi marta
+  administrator sifatida ishga tushirilsa, servis avtomatik o'rnatiladi; aks holda UI buni ko'rsatadi.
+- Servis tizim hisobida ishlaydi va foydalanuvchi PATH'ini ko'rmasligi mumkin, shuning uchun yoqilganda
+  topilgan ffmpeg yo'li `ffmpeg_path` ga yoziladi.
+- `make run` / `go run` rejimida autostart o'chiq (vaqtinchalik exe'ni servis qilib bo'lmaydi).
+- Servis keyingi yoqilishda ishga tushadi; konsoldagi nusxa bilan bir vaqtda ishga tushirmang (port band bo'ladi).
 
 ## Servis sifatida (Windows Service / systemd)
 

@@ -3,6 +3,8 @@
 #   make build     - build for Ubuntu  -> builds/cvms-server-<version>-linux-amd64
 #   make runWin    - run (Windows)
 #   make buildWin  - build for Windows -> builds/cvms-server-<version>-windows-amd64.exe
+#   make update    - git pull the whole project
+#   make push      - commit + push the whole project (make push m="message")
 # The version comes from ../VERSION. Recipes use only `go`, so they work in
 # both cmd.exe (Windows make) and sh (Linux make).
 
@@ -42,3 +44,6 @@ test: sync-ui
 
 vet: sync-ui
 	go vet ./...
+
+# make update / make push act on the whole project (see ../git.mk)
+include ../git.mk

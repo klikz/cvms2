@@ -490,6 +490,55 @@
       CVMS.btn({ icon: "right", size: "sm", disabled: page >= pages, onClick: () => onChange(page + 1) }));
   };
 
+  /* Toggle switch. onChange(checked) may return a Promise; the switch is
+   * disabled while it runs and reverted if it throws. */
+  CVMS.toggle = function (checked, onChange, opts) {
+    opts = opts || {};
+    const input = el("input", { type: "checkbox", checked: checked, disabled: opts.disabled });
+    const sw = el("label", { class: "switch" + (opts.disabled ? " disabled" : "") }, input, el("span", { class: "switch-track" }, el("span", { class: "switch-thumb" })), opts.label ? el("span", { class: "switch-label" }, opts.label) : null);
+    input.addEventListener("change", async () => {
+      const want = input.checked;
+      input.disabled = true;
+      try { await onChange(want); }
+      catch (e) { input.checked = !want; CVMS.err(e); }
+      finally { input.disabled = !!opts.disabled; }
+    });
+    return sw;
+  };
+
+  /* Autostart card shared by client and server settings (GET/PUT /api/autostart). */
+  CVMS.autostartCard = function () {
+    const body = el("div", { class: "card-body" }, CVMS.loading());
+    const card = el("div", { class: "card" },
+      el("div", { class: "card-head" }, el("div", null, el("h3", { class: "card-title" }, t("auto.title")), el("p", { class: "card-sub" }, t("auto.sub")))),
+      body);
+    function render(res) {
+      const st = res.status;
+      const on = st.installed && st.enabled;
+      const blocked = !st.supported || st.dev || st.need_admin;
+      const sw = CVMS.toggle(on, async (want) => {
+        const r = await CVMS.api("/api/autostart", { method: "PUT", body: { enabled: want } });
+        CVMS.toast(want ? t("auto.enabled_ok") : t("auto.disabled_ok"), "ok");
+        render(r);
+      }, { disabled: blocked, label: on ? t("auto.on") : t("auto.off") });
+      const badges = el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", marginTop: "12px" } },
+        el("span", { class: "badge " + (st.installed ? "badge-ok" : "") }, st.installed ? t("auto.installed") : t("auto.not_installed")),
+        st.installed ? el("span", { class: "badge " + (st.enabled ? "badge-ok" : "badge-warn") }, st.enabled ? t("auto.start_auto") : t("auto.start_manual")) : null,
+        el("span", { class: "badge badge-info" }, st.as_service ? t("auto.running_service") : t("auto.running_console")));
+      const notes = [];
+      if (!st.supported) notes.push(["warn", t("auto.unsupported")]);
+      else if (st.dev) notes.push(["warn", t("auto.dev")]);
+      else if (st.need_admin) notes.push(["warn", t("auto.need_admin")]);
+      if (st.error) notes.push(["danger", st.error]);
+      if (res.wanted && !on && !blocked) notes.push(["warn", t("auto.wanted_not_applied")]);
+      if (on && !st.as_service) notes.push(["info", t("auto.next_boot")]);
+      CVMS.clear(body).append(sw, badges,
+        ...notes.map(([k, txt]) => el("div", { class: "notice " + k, style: { marginTop: "12px", marginBottom: 0 } }, CVMS.icon(k === "info" ? "info" : "alert"), el("div", null, txt))));
+    }
+    CVMS.api("/api/autostart").then(render).catch((e) => { CVMS.clear(body).append(el("div", { class: "muted" }, e.message)); });
+    return card;
+  };
+
   /* Paginates and filters a list. Returns {items, page, pages, total}. */
   CVMS.paginate = function (list, page, per) {
     const pages = Math.max(1, Math.ceil(list.length / per));

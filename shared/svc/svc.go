@@ -64,16 +64,30 @@ func IsCommand(arg string) bool {
 	return false
 }
 
+// Spec describes the OS service of an app.
+type Spec struct {
+	Name, Display, Description string
+	// Dir is passed to the service as "-dir <dir>".
+	Dir string
+}
+
+func (s Spec) config() *service.Config {
+	return &service.Config{
+		Name:             s.Name,
+		DisplayName:      s.Display,
+		Description:      s.Description,
+		Arguments:        []string{"-dir", s.Dir},
+		WorkingDirectory: s.Dir,
+	}
+}
+
+// Interactive reports whether the app runs in a console (not as a service).
+func Interactive() bool { return service.Interactive() }
+
 // Main runs the app. If cmd is a service command it is executed instead.
 // dir is passed to the installed service as "-dir <dir>".
 func Main(name, display, desc, dir, cmd string, run RunFunc) {
-	cfg := &service.Config{
-		Name:             name,
-		DisplayName:      display,
-		Description:      desc,
-		Arguments:        []string{"-dir", dir},
-		WorkingDirectory: dir,
-	}
+	cfg := Spec{Name: name, Display: display, Description: desc, Dir: dir}.config()
 	prg := &program{run: run}
 	s, err := service.New(prg, cfg)
 	if err != nil {

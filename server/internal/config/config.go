@@ -50,6 +50,8 @@ type Config struct {
 	WebRTC       WebRTC `yaml:"webrtc"`
 	// AuditViews: which camera views are logged: main | all | none.
 	AuditViews string `yaml:"audit_views"`
+	// Autostart installs the server as an OS service that starts at boot.
+	Autostart bool `yaml:"autostart"`
 
 	path string `yaml:"-"`
 }
@@ -70,6 +72,7 @@ func Default() *Config {
 		H264Encoder:          "auto",
 		H265Fallback:         "server",
 		AuditViews:           "main",
+		Autostart:            true,
 		WebRTC: WebRTC{
 			UDPPort:   8189,
 			TCPPort:   8189,

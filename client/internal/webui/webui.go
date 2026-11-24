@@ -30,6 +30,7 @@ import (
 	"cvms/shared/ffmpegx"
 	"cvms/shared/loginlimit"
 	"cvms/shared/protocol"
+	"cvms/shared/svc"
 )
 
 // Server is the local web UI server.
@@ -43,6 +44,7 @@ type Server struct {
 
 	mu       sync.Mutex
 	sessions map[string]time.Time
+	spec     svc.Spec
 }
 
 // New creates the UI server.
@@ -92,6 +94,8 @@ func (s *Server) Handler() http.Handler {
 			r.Put("/cameras/{id}", s.handleCameraSave)
 			r.Delete("/cameras/{id}", s.handleCameraDelete)
 			r.Get("/cameras/{id}/snapshot", s.handleSnapshot)
+			r.Get("/autostart", s.handleAutostart)
+			r.Put("/autostart", s.handleAutostartSet)
 			r.Post("/cameras/bulk", s.handleBulk)
 			r.Post("/scan", s.handleScan)
 			r.Post("/discover", s.handleDiscover)
