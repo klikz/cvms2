@@ -89,6 +89,7 @@ func (s *Server) Handler() http.Handler {
 			r.Get("/status", s.handleStatus)
 			r.Get("/settings", s.handleSettings)
 			r.Put("/settings", s.handleSettingsSave)
+			r.Post("/server/disconnect", s.handleServerDisconnect)
 			r.Get("/cameras", s.handleCameras)
 			r.Post("/cameras", s.handleCameraSave)
 			r.Put("/cameras/{id}", s.handleCameraSave)
@@ -399,6 +400,22 @@ func (s *Server) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 		s.tun.Reconnect()
 	}
 	writeJSON(w, map[string]any{"ok": true, "restart_required": restart})
+}
+
+// handleServerDisconnect drops the connection to the current server and
+// forgets it (address and approval token), so the client stays offline until
+// a new address is saved.
+func (s *Server) handleServerDisconnect(w http.ResponseWriter, r *http.Request) {
+	err := s.store.Update(func(c *config.Config) error {
+		c.ServerURL, c.ServerToken = "", ""
+		return nil
+	})
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	s.tun.Reconnect()
+	writeJSON(w, okResp)
 }
 
 // ---------------------------------------------------------------- cameras

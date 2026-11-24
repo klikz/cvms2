@@ -55,6 +55,7 @@ type Tunnel struct {
 	mu      sync.Mutex
 	status  Status
 	conn    *conn
+	cancel  context.CancelFunc // aborts the current session, including a dial in progress
 	reset   chan struct{}
 	streams map[uint32]context.CancelFunc
 
@@ -90,8 +91,11 @@ func (t *Tunnel) setStatus(fn func(s *Status)) {
 // Reconnect drops the current connection (e.g. server URL changed).
 func (t *Tunnel) Reconnect() {
 	t.mu.Lock()
-	c := t.conn
+	c, cancel := t.conn, t.cancel
 	t.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	if c != nil {
 		c.close()
 	}
@@ -187,6 +191,11 @@ func (t *Tunnel) session(ctx context.Context, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	t.mu.Lock()
+	t.cancel = cancel
+	t.mu.Unlock()
 	t.setStatus(func(s *Status) { s.State = StateConnecting; s.ServerURL = cfg.ServerURL; s.Error = "" })
 	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second, ReadBufferSize: 16 * 1024, WriteBufferSize: 256 * 1024}
 	ws, _, err := dialer.DialContext(ctx, wsURL, nil)

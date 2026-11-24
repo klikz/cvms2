@@ -699,6 +699,16 @@
       } catch (e) { CVMS.err(e); }
     }
 
+    async function disconnect() {
+      if (!(await CVMS.confirm(t("srv.disconnect"), t("srv.disconnect_confirm")))) return;
+      try {
+        await api("/api/server/disconnect", { method: "POST" });
+        url.value = "";
+        CVMS.toast(t("srv.disconnected_ok"), "ok");
+        setTimeout(loadStatus, 500);
+      } catch (e) { CVMS.err(e); }
+    }
+
     function render() {
       const s = (S.status && S.status.server) || {};
       if (!loaded && S.status) { url.value = s.server_url || ""; loaded = true; }
@@ -710,7 +720,8 @@
             el("div", { class: "conn-title" }, t(st.key)),
             el("div", { class: "muted", style: { fontSize: "12px" } }, t(st.key + "_hint")),
             s.error && s.state !== "connected" ? el("div", { class: "mono", style: { fontSize: "11px", color: "var(--danger)", marginTop: "4px" } }, s.error) : null),
-          s.state === "connected" ? el("span", { class: "muted", style: { fontSize: "12px" } }, t("srv.since", { t: fmt.ago(s.since) })) : null),
+          s.state === "connected" ? el("span", { class: "muted", style: { fontSize: "12px" } }, t("srv.since", { t: fmt.ago(s.since) })) : null,
+          s.state && s.state !== "disabled" ? btn({ label: t("srv.disconnect"), icon: "wifioff", kind: "danger", size: "sm", onClick: disconnect }) : null),
         el("dl", { class: "kv", style: { marginTop: "16px" } },
           el("dt", null, t("settings.client_name")), el("dd", null, (S.status && S.status.name) || "—"),
           el("dt", null, t("srv.client_id")), el("dd", { class: "mono" }, (S.status && S.status.client_uid) || "—"),
