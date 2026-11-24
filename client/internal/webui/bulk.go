@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"cvms/client/internal/onvif"
+	"cvms/client/internal/rtspprobe"
 )
 
 // ---------------------------------------------------------------- bulk add
@@ -21,6 +22,10 @@ type bulkDevice struct {
 	Host string `json:"host"`
 	Port int    `json:"port"`
 	Name string `json:"name"`
+	// ONVIF=false skips ONVIF (scan found only RTSP) and goes to RTSP discovery.
+	ONVIF *bool `json:"onvif"`
+	// RTSPPort for the RTSP fallback (default 554).
+	RTSPPort int `json:"rtsp_port"`
 }
 
 type bulkResult struct {
@@ -32,6 +37,7 @@ type bulkResult struct {
 	CameraID string `json:"camera_id,omitempty"`
 	Name     string `json:"name,omitempty"`
 	Warning  string `json:"warning,omitempty"`
+	Via      string `json:"via,omitempty"` // onvif | rtsp
 }
 
 // handleBulk adds several ONVIF cameras with shared credentials:
@@ -84,15 +90,17 @@ func (s *Server) bulkOne(ctx context.Context, d bulkDevice, user, pass string) b
 		res.Code, res.Error = "camera_exists", "this camera is already added"
 		return res
 	}
-	pctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	info, err := onvif.NewClient(res.Host, res.Port, user, pass).Probe(pctx)
-	cancel()
-	if err != nil {
-		res.Code, res.Error = "onvif_failed", err.Error()
-		if errors.Is(err, onvif.ErrAuth) {
-			res.Code = "onvif_auth"
-		}
-		return res
+	var info *onvif.Info
+	var onvifErr error
+	if d.ONVIF == nil || *d.ONVIF {
+		pctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		info, onvifErr = onvif.NewClient(res.Host, res.Port, user, pass).Probe(pctx)
+		cancel()
+	} else {
+		onvifErr = errors.New("ONVIF not available")
+	}
+	if onvifErr != nil {
+		return s.bulkRTSP(ctx, d, res, user, pass, onvifErr)
 	}
 	main, sub := onvif.PickStreams(info.Profiles)
 	name := strings.TrimSpace(d.Name)
@@ -116,8 +124,85 @@ func (s *Server) bulkOne(ctx context.Context, d bulkDevice, user, pass string) b
 		res.Error = err.Error()
 		return res
 	}
-	res.OK, res.CameraID, res.Name, res.Warning = true, cam.ID, cam.Name, probeErr
+	res.OK, res.CameraID, res.Name, res.Warning, res.Via = true, cam.ID, cam.Name, probeErr, "onvif"
 	return res
+}
+
+// bulkRTSP is the fallback when ONVIF fails: it tries the RTSP paths of
+// common vendors with the same credentials.
+func (s *Server) bulkRTSP(ctx context.Context, d bulkDevice, res bulkResult, user, pass string, onvifErr error) bulkResult {
+	f, err := rtspprobe.Find(ctx, res.Host, d.RTSPPort, user, pass)
+	if err != nil {
+		res.Code, res.Error = rtspCode(err, onvifErr), fmt.Sprintf("ONVIF: %v; RTSP: %v", onvifErr, err)
+		return res
+	}
+	name := strings.TrimSpace(d.Name)
+	if name == "" {
+		name = res.Host
+	}
+	p := pass
+	cam, probeErr, err := s.saveCamera(ctx, "", cameraReq{
+		Name: name, Host: res.Host, ONVIFPort: res.Port, Username: user, Password: &p,
+		Manufacturer: f.Vendor, MainURL: f.Main, SubURL: f.Sub,
+	})
+	if err != nil {
+		var se *saveError
+		if errors.As(err, &se) {
+			res.Code = se.code
+		}
+		res.Error = err.Error()
+		return res
+	}
+	res.OK, res.CameraID, res.Name, res.Via = true, cam.ID, cam.Name, "rtsp"
+	res.Warning = strings.TrimSpace("ONVIF: " + onvifErr.Error() + ". " + probeErr)
+	return res
+}
+
+// rtspCode maps the combined ONVIF + RTSP failure to an error code.
+func rtspCode(rtspErr, onvifErr error) string {
+	switch {
+	case errors.Is(rtspErr, rtspprobe.ErrAuth):
+		return "auth_failed" // both refused the login: credentials are wrong
+	case errors.Is(onvifErr, onvif.ErrAuth):
+		return "onvif_auth"
+	case errors.Is(rtspErr, rtspprobe.ErrUnreachable):
+		return "unreachable"
+	}
+	return "not_found"
+}
+
+// handleRTSPFind tries common RTSP paths on a host (used when ONVIF fails
+// in the camera editor).
+func (s *Server) handleRTSPFind(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Host     string `json:"host"`
+		Port     int    `json:"port"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+		CameraID string `json:"camera_id"`
+	}
+	if err := readJSON(r, &req); err != nil || strings.TrimSpace(req.Host) == "" {
+		apiError(w, http.StatusBadRequest, "bad_request", "host is required")
+		return
+	}
+	if req.Password == "" && req.CameraID != "" {
+		if c, ok := s.store.Camera(req.CameraID); ok {
+			req.Password = c.Password
+		}
+	}
+	f, err := rtspprobe.Find(r.Context(), strings.TrimSpace(req.Host), req.Port, req.Username, req.Password)
+	if err != nil {
+		code := "rtsp_not_found"
+		switch {
+		case errors.Is(err, rtspprobe.ErrAuth):
+			code = "rtsp_auth"
+		case errors.Is(err, rtspprobe.ErrUnreachable):
+			code = "rtsp_unreachable"
+		}
+		apiError(w, http.StatusBadGateway, code, err.Error())
+		return
+	}
+	writeJSON(w, f)
 }
 
 func onvifKey(host string, port int) string {

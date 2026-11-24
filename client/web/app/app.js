@@ -384,7 +384,9 @@
 
   function addPage() {
     const c = page(t("nav.add_camera"), t("add.sub"));
-    CVMS.shell.setActions(btn({ label: t("add.by_rtsp"), icon: "link", onClick: () => cameraEditor(null, { mode: "rtsp" }) }));
+    CVMS.shell.setActions(
+      btn({ label: t("add.by_onvif"), icon: "radar", onClick: () => cameraEditor(null, { mode: "onvif", user: A.user, pass: A.pass }) }),
+      btn({ label: t("add.by_rtsp"), icon: "link", onClick: () => cameraEditor(null, { mode: "rtsp", user: A.user, pass: A.pass }) }));
     const user = el("input", { class: "input", value: A.user, autocomplete: "off", placeholder: t("auth.username") });
     const pass = el("input", { class: "input", type: "password", value: A.pass, autocomplete: "new-password", placeholder: t("auth.password") });
     user.oninput = () => { A.user = user.value; };
@@ -418,7 +420,7 @@
         tableBox,
         el("div", { class: "card-body row", style: { justifyContent: "space-between", borderTop: "1px solid var(--border)" } }, selInfo, addBtn)));
 
-    function selectable(r) { return r.onvif && !r.added && r.status !== "adding"; }
+    function selectable(r) { return (r.onvif || r.rtsp) && !r.added && r.status !== "adding"; }
     function visibleRows() {
       const needle = A.q.toLowerCase();
       return [...A.rows.values()]
@@ -428,10 +430,10 @@
     function statusBadge(r) {
       switch (r.status) {
         case "adding": return el("span", { class: "row", style: { gap: "6px" } }, el("div", { class: "spinner", style: { width: "14px", height: "14px" } }), t("add.st_adding"));
-        case "ok": return el("span", { class: "badge badge-ok badge-dot", title: r.warning || "" }, t("add.st_ok"));
+        case "ok": return el("span", { class: "badge badge-ok badge-dot", title: r.warning || "" }, r.via === "rtsp" ? t("add.st_ok_rtsp") : t("add.st_ok"));
         case "added": return el("span", { class: "badge badge-dot" }, t("add.added"));
-        case "error": return el("span", { class: "badge badge-danger badge-dot", title: r.error }, r.code === "onvif_auth" ? t("add.st_auth") : t("add.failed"));
-        default: return r.onvif ? el("span", { class: "badge badge-accent" }, t("add.st_new")) : el("span", { class: "badge badge-warn", title: t("add.rtsp_only_hint") }, t("add.st_rtsp_only"));
+        case "error": return el("span", { class: "badge badge-danger badge-dot", title: r.error }, r.code === "auth_failed" || r.code === "onvif_auth" ? t("add.st_auth") : r.code === "not_found" ? t("add.st_not_found") : r.code === "unreachable" ? t("add.st_unreachable") : t("add.failed"));
+        default: return r.onvif ? el("span", { class: "badge badge-accent" }, t("add.st_new")) : el("span", { class: "badge badge-warn", title: t("add.rtsp_only_hint") }, t("add.st_new_rtsp"));
       }
     }
     function updateSel() {
@@ -504,12 +506,12 @@
       renderTable();
       addBtn.disabled = true;
       try {
-        const res = await api("/api/cameras/bulk", { method: "POST", body: { username: A.user, password: A.pass, devices: targets.map((r) => ({ host: r.ip, port: r.port, name: r.name })) } });
+        const res = await api("/api/cameras/bulk", { method: "POST", body: { username: A.user, password: A.pass, devices: targets.map((r) => ({ host: r.ip, port: r.port, name: r.name, onvif: !!r.onvif })) } });
         res.results.forEach((x) => {
           const r = A.rows.get(rowKey(x.host, x.port));
           if (!r) return;
           r.selected = false;
-          if (x.ok) { r.status = "ok"; r.added = true; r.name = x.name || r.name; r.warning = x.warning; }
+          if (x.ok) { r.status = "ok"; r.added = true; r.name = x.name || r.name; r.warning = x.warning; r.via = x.via; }
           else if (x.code === "camera_exists") { r.status = "added"; r.added = true; }
           else { r.status = "error"; r.error = x.error; r.code = x.code; }
         });
@@ -565,7 +567,9 @@
       profileBox);
 
     const testBtn = btn({ label: t("add.test"), icon: "activity", size: "sm", onClick: testRTSP });
+    const rtspNote = el("div");
     rtspBox.append(
+      rtspNote,
       CVMS.field(t("add.main_url"), f.main), mainRes,
       CVMS.field(t("add.sub_url"), f.sub, t("add.sub_hint")), subRes,
       el("div", { class: "form-row" }, CVMS.field(t("auth.username"), f.user.cloneNode()), CVMS.field(t("auth.password"), f.pass.cloneNode())),
@@ -575,6 +579,27 @@
     u2.value = f.user.value;
     const sync = (a, b) => { a.addEventListener("input", () => { b.value = a.value; }); };
     sync(f.user, u2); sync(u2, f.user); sync(f.pass, p2); sync(p2, f.pass);
+
+    // ONVIF failed: try the RTSP paths of common vendors with the same login
+    async function rtspFallback(onvifErr) {
+      CVMS.clear(profileBox).append(el("div", { class: "row muted", style: { marginBottom: "12px" } }, el("div", { class: "spinner" }), t("add.rtsp_searching")));
+      try {
+        const r = await api("/api/rtsp/find", { method: "POST", body: { host: f.host.value.trim(), port: 554, username: f.user.value, password: f.pass.value, camera_id: cam ? cam.id : "" } });
+        f.main.value = r.main;
+        f.sub.value = r.sub || "";
+        meta.mainSnap = ""; meta.subSnap = "";
+        if (!meta.manufacturer) meta.manufacturer = r.vendor;
+        if (!f.name.value) f.name.value = f.host.value.trim();
+        CVMS.clear(profileBox);
+        mode = "rtsp";
+        renderTabs();
+        rtspNote.replaceChildren(notice("info", "info", t("add.rtsp_found", { vendor: r.vendor, err: onvifErr.message })));
+        testRTSP();
+      } catch (e2) {
+        const both = e2.code === "rtsp_auth" && onvifErr.code === "onvif_auth";
+        CVMS.clear(profileBox).append(notice("danger", "alert", both ? t("add.both_auth") : t("add.onvif_rtsp_failed", { onvif: onvifErr.message, rtsp: e2.message })));
+      }
+    }
 
     async function connectONVIF() {
       connectBtn.disabled = true;
@@ -597,7 +622,7 @@
           CVMS.field(t("cam.sub"), selSub, t("add.sub_hint"))));
         profileBox.querySelectorAll(".badge svg").forEach((s) => { s.style.width = "11px"; s.style.height = "11px"; });
       } catch (e) {
-        CVMS.clear(profileBox).append(notice("danger", "alert", e.message + (e.code === "onvif_failed" ? " — " + t("add.try_rtsp") : "")));
+        await rtspFallback(e);
       } finally { connectBtn.disabled = false; }
     }
 

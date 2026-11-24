@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"cvms/client/internal/digest"
 )
 
 // ---------------------------------------------------------------- tiny XML tree
@@ -247,6 +249,24 @@ type Client struct {
 	Password  string
 	http      *http.Client
 	timeShift time.Duration
+	// wsMode selects the WS-Security UsernameToken variant; cameras differ
+	// in what they accept (see wsModes). The working mode is kept.
+	wsMode int
+	// LastAuth describes the authentication that worked (for logs/UI).
+	LastAuth string
+}
+
+// WS-Security variants tried in order when a device answers NotAuthorized.
+var wsModes = []struct {
+	name     string
+	plain    bool // PasswordText instead of PasswordDigest
+	millis   bool // Created with milliseconds
+	syncTime bool // use the device clock for Created
+}{
+	{"digest", false, true, true},
+	{"digest-nomillis", false, false, true},
+	{"digest-localtime", false, false, false},
+	{"plaintext", true, false, true},
 }
 
 // NewClient creates a client for host:port.
@@ -266,19 +286,35 @@ func (c *Client) security() string {
 	if c.Username == "" {
 		return ""
 	}
+	m := wsModes[c.wsMode]
 	nonce := make([]byte, 16)
 	_, _ = rand.Read(nonce)
-	created := time.Now().Add(c.timeShift).UTC().Format("2006-01-02T15:04:05.000Z")
-	h := sha1.New()
-	h.Write(nonce)
-	h.Write([]byte(created))
-	h.Write([]byte(c.Password))
-	digest := base64.StdEncoding.EncodeToString(h.Sum(nil))
-	var user bytes.Buffer
+	now := time.Now()
+	if m.syncTime {
+		now = now.Add(c.timeShift)
+	}
+	layout := "2006-01-02T15:04:05Z"
+	if m.millis {
+		layout = "2006-01-02T15:04:05.000Z"
+	}
+	created := now.UTC().Format(layout)
+	var user, pass bytes.Buffer
 	_ = xml.EscapeText(&user, []byte(c.Username))
+	pwType, pwValue := "PasswordDigest", ""
+	if m.plain {
+		pwType = "PasswordText"
+		_ = xml.EscapeText(&pass, []byte(c.Password))
+		pwValue = pass.String()
+	} else {
+		h := sha1.New()
+		h.Write(nonce)
+		h.Write([]byte(created))
+		h.Write([]byte(c.Password))
+		pwValue = base64.StdEncoding.EncodeToString(h.Sum(nil))
+	}
 	return `<s:Header><Security s:mustUnderstand="1" xmlns="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"><UsernameToken>` +
 		`<Username>` + user.String() + `</Username>` +
-		`<Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest">` + digest + `</Password>` +
+		`<Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#` + pwType + `">` + pwValue + `</Password>` +
 		`<Nonce EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary">` + base64.StdEncoding.EncodeToString(nonce) + `</Nonce>` +
 		`<Created xmlns="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">` + created + `</Created>` +
 		`</UsernameToken></Security></s:Header>`
@@ -287,7 +323,35 @@ func (c *Client) security() string {
 // ErrAuth is returned when the device rejects the credentials.
 var ErrAuth = errors.New("onvif: authentication failed")
 
+// AuthError carries details of a rejected login.
+type AuthError struct{ Detail string }
+
+func (e *AuthError) Error() string   { return "onvif: authentication failed (" + e.Detail + ")" }
+func (e *AuthError) Is(t error) bool { return t == ErrAuth }
+
+// call sends one SOAP request. With auth, it adds WS-Security and answers
+// an HTTP 401 challenge with HTTP Digest/Basic using the same credentials
+// (many Dahua/Uniview/newer Hikvision devices require HTTP Digest).
 func (c *Client) call(ctx context.Context, endpoint, body string, auth bool) (*node, error) {
+	root, status, chal, err := c.do(ctx, endpoint, body, auth, "")
+	if err == nil || !auth || c.Username == "" || status != http.StatusUnauthorized || len(chal) == 0 {
+		return root, err
+	}
+	u, _ := url.Parse(endpoint)
+	h, herr := digest.Header(digest.Pick(chal), http.MethodPost, u.RequestURI(), c.Username, c.Password)
+	if herr != nil {
+		return nil, err
+	}
+	root, status, _, err = c.do(ctx, endpoint, body, auth, h)
+	if err == nil {
+		c.LastAuth = "http-" + digest.ParseChallenge(digest.Pick(chal))["scheme"] + "+" + wsModes[c.wsMode].name
+	} else if status == http.StatusUnauthorized {
+		err = &AuthError{Detail: "HTTP 401 with " + digest.ParseChallenge(digest.Pick(chal))["scheme"]}
+	}
+	return root, err
+}
+
+func (c *Client) do(ctx context.Context, endpoint, body string, auth bool, authHeader string) (*node, int, []string, error) {
 	hdr := ""
 	if auth {
 		hdr = c.security()
@@ -295,37 +359,65 @@ func (c *Client) call(ctx context.Context, endpoint, body string, auth bool) (*n
 	env := `<?xml version="1.0" encoding="UTF-8"?><s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">` + hdr + `<s:Body>` + body + `</s:Body></s:Envelope>`
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(env))
 	if err != nil {
-		return nil, err
+		return nil, 0, nil, err
 	}
 	req.Header.Set("Content-Type", `application/soap+xml; charset=utf-8`)
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, nil, err
 	}
 	defer resp.Body.Close()
+	chal := resp.Header.Values("WWW-Authenticate")
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return nil, err
+		return nil, resp.StatusCode, chal, err
 	}
-	root, err := parseXML(b)
-	if err != nil {
-		return nil, fmt.Errorf("onvif: bad response (%d)", resp.StatusCode)
-	}
-	if f := root.find("Fault"); f != nil {
-		reason := root.text("Reason", "Text")
-		sub := strings.ToLower(root.text("Subcode", "Value") + " " + reason)
-		if resp.StatusCode == 401 || strings.Contains(sub, "notauthorized") || strings.Contains(sub, "not authorized") || strings.Contains(sub, "authenticat") {
-			return nil, ErrAuth
+	root, perr := parseXML(b)
+	if perr == nil {
+		if f := root.find("Fault"); f != nil {
+			reason := root.text("Reason", "Text")
+			sub := strings.ToLower(root.text("Subcode", "Value") + " " + reason)
+			if resp.StatusCode == 401 || strings.Contains(sub, "notauthorized") || strings.Contains(sub, "not authorized") || strings.Contains(sub, "authenticat") {
+				return nil, resp.StatusCode, chal, &AuthError{Detail: "SOAP " + strings.TrimSpace(root.text("Subcode", "Value"))}
+			}
+			return nil, resp.StatusCode, chal, fmt.Errorf("onvif fault: %s", reason)
 		}
-		return nil, fmt.Errorf("onvif fault: %s", reason)
 	}
 	if resp.StatusCode == 401 {
-		return nil, ErrAuth
+		return nil, resp.StatusCode, chal, &AuthError{Detail: "HTTP 401"}
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("onvif: http %d", resp.StatusCode)
+		return nil, resp.StatusCode, chal, fmt.Errorf("onvif: http %d", resp.StatusCode)
 	}
-	return root, nil
+	if perr != nil {
+		return nil, resp.StatusCode, chal, fmt.Errorf("onvif: bad response (%d)", resp.StatusCode)
+	}
+	if auth && c.LastAuth == "" {
+		c.LastAuth = wsModes[c.wsMode].name
+	}
+	return root, resp.StatusCode, chal, nil
+}
+
+// callAuth is call with credentials, trying the WS-Security variants in
+// turn when the device rejects the login. The first working one is kept.
+func (c *Client) callAuth(ctx context.Context, endpoint, body string) (*node, error) {
+	start := c.wsMode
+	var firstErr error
+	for i := start; i < len(wsModes); i++ {
+		c.wsMode = i
+		root, err := c.call(ctx, endpoint, body, true)
+		if err == nil || !errors.Is(err, ErrAuth) || c.Username == "" {
+			return root, err
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	c.wsMode = start
+	return nil, firstErr
 }
 
 // Ping checks that an ONVIF device service answers (no credentials needed).
@@ -383,31 +475,52 @@ type Info struct {
 func (c *Client) Probe(ctx context.Context) (*Info, error) {
 	c.syncTime(ctx)
 	info := &Info{}
-	root, err := c.call(ctx, c.DeviceURL, `<GetDeviceInformation xmlns="http://www.onvif.org/ver10/device/wsdl"/>`, true)
-	if err != nil {
-		if errors.Is(err, ErrAuth) {
-			return nil, err
-		}
-		// some devices only answer media calls; continue
-	} else {
+	// Device info is optional: some devices protect only some calls, so an
+	// auth error here does not stop the probe.
+	root, authErr := c.callAuth(ctx, c.DeviceURL, `<GetDeviceInformation xmlns="http://www.onvif.org/ver10/device/wsdl"/>`)
+	if authErr == nil {
 		info.Manufacturer = root.text("Manufacturer")
 		info.Model = root.text("Model")
 		info.Firmware = root.text("FirmwareVersion")
 		info.Serial = root.text("SerialNumber")
+	} else if !errors.Is(authErr, ErrAuth) {
+		authErr = nil
 	}
 	mediaURL := c.DeviceURL
-	if root, err := c.call(ctx, c.DeviceURL, `<GetCapabilities xmlns="http://www.onvif.org/ver10/device/wsdl"><Category>Media</Category></GetCapabilities>`, true); err == nil {
+	caps := `<GetCapabilities xmlns="http://www.onvif.org/ver10/device/wsdl"><Category>Media</Category></GetCapabilities>`
+	if root, err := c.callAuth(ctx, c.DeviceURL, caps); err == nil {
 		if m := root.find("Media"); m != nil {
 			if x := m.text("XAddr"); x != "" {
 				mediaURL = c.fixHost(x)
 			}
 		}
-	} else if errors.Is(err, ErrAuth) {
+	} else if root, err := c.call(ctx, c.DeviceURL, caps, false); err == nil {
+		if m := root.find("Media"); m != nil {
+			if x := m.text("XAddr"); x != "" {
+				mediaURL = c.fixHost(x)
+			}
+		}
+	}
+	profiles := `<GetProfiles xmlns="http://www.onvif.org/ver10/media/wsdl"/>`
+	root, err := c.callAuth(ctx, mediaURL, profiles)
+	authed := true
+	if err != nil && errors.Is(err, ErrAuth) {
+		// last resort: devices with ONVIF authentication turned off
+		if r, err2 := c.call(ctx, mediaURL, profiles, false); err2 == nil {
+			root, err, authed = r, nil, false
+		}
+	}
+	if err != nil {
+		if authErr != nil && errors.Is(err, ErrAuth) {
+			return nil, authErr
+		}
 		return nil, err
 	}
-	root, err = c.call(ctx, mediaURL, `<GetProfiles xmlns="http://www.onvif.org/ver10/media/wsdl"/>`, true)
-	if err != nil {
-		return nil, err
+	callMedia := func(body string) (*node, error) {
+		if authed {
+			return c.callAuth(ctx, mediaURL, body)
+		}
+		return c.call(ctx, mediaURL, body, false)
 	}
 	for _, p := range root.findAll("Profiles") {
 		pr := Profile{Token: p.Attrs["token"], Name: p.text("Name")}
@@ -420,11 +533,11 @@ func (c *Client) Probe(ctx context.Context) (*Info, error) {
 			continue
 		}
 		body := `<GetStreamUri xmlns="http://www.onvif.org/ver10/media/wsdl"><StreamSetup><Stream xmlns="http://www.onvif.org/ver10/schema">RTP-Unicast</Stream><Transport xmlns="http://www.onvif.org/ver10/schema"><Protocol>RTSP</Protocol></Transport></StreamSetup><ProfileToken>` + xmlEscape(pr.Token) + `</ProfileToken></GetStreamUri>`
-		if r, err := c.call(ctx, mediaURL, body, true); err == nil {
+		if r, err := callMedia(body); err == nil {
 			pr.URI = c.fixHost(r.text("MediaUri", "Uri"))
 		}
 		snapBody := `<GetSnapshotUri xmlns="http://www.onvif.org/ver10/media/wsdl"><ProfileToken>` + xmlEscape(pr.Token) + `</ProfileToken></GetSnapshotUri>`
-		if r, err := c.call(ctx, mediaURL, snapBody, true); err == nil {
+		if r, err := callMedia(snapBody); err == nil {
 			if u := r.text("MediaUri", "Uri"); strings.HasPrefix(strings.ToLower(u), "http") {
 				pr.SnapshotURI = c.fixHost(u)
 			}

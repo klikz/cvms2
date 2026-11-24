@@ -2,6 +2,7 @@ package cameras
 
 import (
 	"context"
+	"cvms/client/internal/digest"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,10 +20,10 @@ func TestHTTPSnapshotDigest(t *testing.T) {
 			w.WriteHeader(401)
 			return
 		}
-		p := parseChallenge(a)
-		ha1 := md5hex("admin:" + realm + ":secret")
-		ha2 := md5hex("GET:" + p["uri"])
-		want := md5hex(ha1 + ":" + nonce + ":" + p["nc"] + ":" + p["cnonce"] + ":auth:" + ha2)
+		p := digest.ParseChallenge(a)
+		ha1 := digest.MD5Hex("admin:" + realm + ":secret")
+		ha2 := digest.MD5Hex("GET:" + p["uri"])
+		want := digest.MD5Hex(ha1 + ":" + nonce + ":" + p["nc"] + ":" + p["cnonce"] + ":auth:" + ha2)
 		if p["response"] != want || p["opaque"] != "o1" {
 			w.WriteHeader(401)
 			return

@@ -3,6 +3,7 @@ package webui
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -110,5 +111,70 @@ func TestBulkAddONVIF(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &out)
 	if out.Added != 0 || out.Results[0].Code != "onvif_auth" {
 		t.Fatalf("want onvif_auth, got %+v", out.Results)
+	}
+}
+
+// fakeRTSPServer answers DESCRIBE on the Hikvision path without auth.
+func fakeRTSPServer(t *testing.T) int {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 4096)
+				for {
+					n, err := c.Read(buf)
+					if err != nil {
+						return
+					}
+					req := string(buf[:n])
+					cseq := "1"
+					if i := strings.Index(req, "CSeq: "); i >= 0 {
+						cseq = strings.Fields(req[i+6:])[0]
+					}
+					if strings.Contains(req, "/Streaming/Channels/10") {
+						sdp := "v=0\r\nm=video 0 RTP/AVP 96\r\n"
+						fmt.Fprintf(c, "RTSP/1.0 200 OK\r\nCSeq: %s\r\nContent-Length: %d\r\n\r\n%s", cseq, len(sdp), sdp)
+					} else {
+						fmt.Fprintf(c, "RTSP/1.0 404 Not Found\r\nCSeq: %s\r\n\r\n", cseq)
+					}
+				}
+			}(c)
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+func TestBulkFallsBackToRTSP(t *testing.T) {
+	onv := fakeONVIF(t, "someone-else") // ONVIF rejects our login
+	defer onv.Close()
+	host, portS, _ := net.SplitHostPort(strings.TrimPrefix(onv.URL, "http://"))
+	port, _ := strconv.Atoi(portS)
+	rtspPort := fakeRTSPServer(t)
+
+	s := testServer(t)
+	body, _ := json.Marshal(map[string]any{"username": "admin", "password": "pw",
+		"devices": []map[string]any{{"host": host, "port": port, "rtsp_port": rtspPort}}})
+	rec := httptest.NewRecorder()
+	s.handleBulk(rec, httptest.NewRequest("POST", "/api/cameras/bulk", bytes.NewReader(body)))
+	var out struct {
+		Results []bulkResult `json:"results"`
+		Added   int          `json:"added"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if out.Added != 1 || out.Results[0].Via != "rtsp" {
+		t.Fatalf("want RTSP fallback, got %+v", out.Results)
+	}
+	c := s.store.Get().Cameras[0]
+	if !strings.HasSuffix(c.Main.URL, "/Streaming/Channels/101") || !strings.HasSuffix(c.Sub.URL, "/Streaming/Channels/102") || c.Manufacturer != "Hikvision" {
+		t.Fatalf("bad camera %+v", c)
 	}
 }
