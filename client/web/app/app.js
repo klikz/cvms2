@@ -386,7 +386,8 @@
     const c = page(t("nav.add_camera"), t("add.sub"));
     CVMS.shell.setActions(
       btn({ label: t("add.by_onvif"), icon: "radar", onClick: () => cameraEditor(null, { mode: "onvif", user: A.user, pass: A.pass }) }),
-      btn({ label: t("add.by_rtsp"), icon: "link", onClick: () => cameraEditor(null, { mode: "rtsp", user: A.user, pass: A.pass }) }));
+      btn({ label: t("add.by_rtsp"), icon: "link", onClick: () => cameraEditor(null, { mode: "rtsp", user: A.user, pass: A.pass }) }),
+      btn({ label: t("add.by_nvr"), icon: "server", onClick: () => nvrDialog({ user: A.user, pass: A.pass }) }));
     const user = el("input", { class: "input", value: A.user, autocomplete: "off", placeholder: t("auth.username") });
     const pass = el("input", { class: "input", type: "password", value: A.pass, autocomplete: "new-password", placeholder: t("auth.password") });
     user.oninput = () => { A.user = user.value; };
@@ -670,6 +671,160 @@
           if (S.afterSave) S.afterSave();
         },
       }],
+    });
+  }
+
+  /* ================================================================ Hikvision NVR */
+  /* Reads the NVR channel list over ISAPI and adds the checked channels.
+   * One mode applies to all of them: through the NVR or straight to each camera. */
+  function nvrDialog(opts) {
+    opts = opts || {};
+    const f = {
+      host: el("input", { class: "input", placeholder: "192.168.1.100" }),
+      port: el("input", { class: "input", type: "number", value: 80, min: "1", max: "65535" }),
+      user: el("input", { class: "input", value: opts.user !== undefined ? opts.user : "admin", autocomplete: "off" }),
+      pass: el("input", { class: "input", type: "password", value: opts.pass || "", autocomplete: "new-password" }),
+      rtsp: el("input", { class: "input", type: "number", value: 554, min: "1", max: "65535" }),
+      camUser: el("input", { class: "input", autocomplete: "off" }),
+      camPass: el("input", { class: "input", type: "password", autocomplete: "new-password" }),
+    };
+    const N = { dev: null, host: "", port: 80, chans: [], mode: "nvr", camCredsTouched: false, busy: false };
+    const fetchBtn = btn({ label: t("add.nvr_fetch"), icon: "search", kind: "primary", onClick: fetchChannels });
+    f.host.addEventListener("keydown", (e) => { if (e.key === "Enter") fetchChannels(); });
+    const listBox = el("div");
+    const modeTabs = el("div", { class: "tabs" });
+    const modeHint = el("p", { class: "muted", style: { fontSize: "12px", margin: "0 0 12px" } });
+    const nvrOpts = el("div", { class: "form-row" }, CVMS.field(t("add.rtsp_port"), f.rtsp));
+    const directOpts = el("div", null, el("div", { class: "muted", style: { fontSize: "12px", marginBottom: "6px" } }, t("add.nvr_cam_creds")),
+      el("div", { class: "form-row" }, CVMS.field(t("auth.username"), f.camUser), CVMS.field(t("auth.password"), f.camPass)));
+    const modeBox = el("div", { style: { display: "none", marginTop: "16px" } }, el("div", { style: { fontWeight: "600", marginBottom: "8px" } }, t("add.nvr_mode")), modeTabs, modeHint, nvrOpts, directOpts);
+    const addBtn = btn({ label: t("add.add_selected", { n: 0 }), icon: "plus", kind: "primary", onClick: addSelected });
+    addBtn.disabled = true;
+    modeBox.append(el("div", { class: "row", style: { justifyContent: "flex-end", marginTop: "12px" } }, addBtn));
+    // camera credentials follow the NVR ones until edited
+    const follow = () => { if (!N.camCredsTouched) { f.camUser.value = f.user.value; f.camPass.value = f.pass.value; } };
+    f.user.addEventListener("input", follow); f.pass.addEventListener("input", follow);
+    f.camUser.addEventListener("input", () => { N.camCredsTouched = true; });
+    f.camPass.addEventListener("input", () => { N.camCredsTouched = true; });
+    follow();
+
+    const isAdded = (c) => (N.mode === "nvr" ? c.added_nvr : c.added_direct);
+    const selectable = (c) => !isAdded(c) && c.status !== "adding" && c.status !== "ok" && (N.mode === "nvr" || !!c.ip);
+
+    function renderMode() {
+      CVMS.clear(modeTabs).append(
+        el("button", { class: "tab" + (N.mode === "nvr" ? " active" : ""), onclick: () => setMode("nvr") }, t("add.nvr_mode_nvr")),
+        el("button", { class: "tab" + (N.mode === "direct" ? " active" : ""), onclick: () => setMode("direct") }, t("add.nvr_mode_direct")));
+      modeHint.textContent = t(N.mode === "nvr" ? "add.nvr_mode_nvr_hint" : "add.nvr_mode_direct_hint");
+      nvrOpts.style.display = N.mode === "nvr" ? "" : "none";
+      directOpts.style.display = N.mode === "direct" ? "" : "none";
+    }
+    function setMode(m) {
+      if (N.busy) return;
+      N.mode = m;
+      N.chans.forEach((c) => { if (!selectable(c)) c.selected = false; if (c.status === "error") { c.status = ""; c.error = ""; } });
+      renderMode();
+      renderList();
+    }
+
+    function statusOf(c) {
+      if (c.status === "adding") return el("span", { class: "row", style: { gap: "6px" } }, el("div", { class: "spinner", style: { width: "14px", height: "14px" } }), t("add.st_adding"));
+      if (c.status === "ok") return el("span", { class: "badge badge-ok badge-dot", title: c.warning || "" }, t("add.st_ok"));
+      if (c.status === "error") return el("span", { class: "badge badge-danger badge-dot", title: c.error }, c.code && t("err." + c.code) !== "err." + c.code ? t("err." + c.code) : t("add.failed"));
+      if (isAdded(c)) return el("span", { class: "badge badge-dot" }, t("add.added"));
+      return c.online ? el("span", { class: "badge badge-ok" }, t("add.nvr_online")) : el("span", { class: "badge badge-warn" }, t("add.nvr_offline"));
+    }
+
+    function renderList() {
+      CVMS.clear(listBox);
+      if (!N.dev) return;
+      const n = N.chans.filter((c) => c.selected && selectable(c)).length;
+      addBtn.lastChild.textContent = t("add.add_selected", { n });
+      addBtn.disabled = n === 0 || N.busy;
+      const head = el("div", { class: "row", style: { margin: "16px 0 8px", gap: "8px" } },
+        el("span", { class: "badge badge-ok" }, t("add.connected")),
+        el("b", null, [N.dev.name, N.dev.model].filter(Boolean).join(" · ") || N.host),
+        el("span", { class: "muted", style: { fontSize: "12px" } }, t("add.nvr_channels", { n: N.chans.length })));
+      if (!N.chans.length) { listBox.append(head, CVMS.emptyState("camera", t("add.nvr_no_channels"), "")); return; }
+      const sel = N.chans.filter(selectable);
+      const all = el("input", { type: "checkbox", checked: sel.length > 0 && sel.every((c) => c.selected), disabled: !sel.length || N.busy });
+      all.onchange = () => { sel.forEach((c) => (c.selected = all.checked)); renderList(); };
+      listBox.append(head, el("div", { class: "table-wrap", style: { maxHeight: "340px", overflow: "auto" } }, el("table", { class: "table" },
+        el("thead", null, el("tr", null, el("th", { style: { width: "36px" } }, el("label", { class: "check" }, all)), el("th", null, "№"), el("th", null, t("col.name")), el("th", null, t("add.nvr_cam_ip")), el("th", null, t("col.status")))),
+        el("tbody", null, N.chans.map((c) => {
+          const cb = el("input", { type: "checkbox", checked: c.selected && selectable(c), disabled: !selectable(c) || N.busy });
+          cb.onchange = () => { c.selected = cb.checked; renderList(); };
+          return el("tr", null,
+            el("td", null, el("label", { class: "check" }, cb)),
+            el("td", { class: "mono muted" }, (c.analog ? "A" : "D") + c.id),
+            el("td", null, el("div", null, c.name || el("span", { class: "dim" }, "—")),
+              c.status === "error" && c.error ? el("div", { style: { fontSize: "11px", color: "var(--danger)" } }, c.error) : null),
+            el("td", { class: "mono" }, c.ip || el("span", { class: "dim" }, c.analog ? t("add.nvr_analog") : "—")),
+            el("td", null, statusOf(c)));
+        })))));
+    }
+
+    async function fetchChannels() {
+      const host = f.host.value.trim();
+      if (!host) { f.host.focus(); return; }
+      fetchBtn.disabled = true;
+      N.dev = null;
+      modeBox.style.display = "none";
+      CVMS.clear(listBox).append(el("div", { class: "row muted", style: { margin: "16px 0" } }, el("div", { class: "spinner" }), t("add.connecting")));
+      try {
+        const r = await api("/api/nvr/channels", { method: "POST", body: { host, port: +f.port.value || 80, username: f.user.value, password: f.pass.value } });
+        N.dev = r.device || {}; N.host = host; N.port = +f.port.value || 80;
+        f.rtsp.value = r.rtsp_port || 554;
+        N.chans = (r.channels || []).map((c) => Object.assign(c, { status: "", error: "", selected: false }));
+        N.chans.forEach((c) => { c.selected = selectable(c) && c.online; });
+        modeBox.style.display = "";
+        renderMode();
+        renderList();
+      } catch (e) {
+        CVMS.clear(listBox).append(el("div", { style: { marginTop: "16px" } }, notice("danger", "alert", e.message)));
+      } finally { fetchBtn.disabled = false; }
+    }
+
+    async function addSelected() {
+      const targets = N.chans.filter((c) => c.selected && selectable(c));
+      if (!targets.length) return true;
+      N.busy = true;
+      targets.forEach((c) => { c.status = "adding"; c.error = ""; });
+      renderList();
+      try {
+        const res = await api("/api/nvr/add", { method: "POST", body: {
+          host: N.host, port: N.port, username: f.user.value, password: f.pass.value, rtsp_port: +f.rtsp.value || 554,
+          mode: N.mode, cam_username: f.camUser.value, cam_password: f.camPass.value,
+          device_name: N.dev.name || "", model: N.dev.model || "",
+          channels: targets.map((c) => ({ id: c.id, name: c.name, ip: c.ip || "" })),
+        } });
+        res.results.forEach((x) => {
+          const c = N.chans.find((k) => k.id === x.port);
+          if (!c) return;
+          c.selected = false;
+          if (x.ok) { c.status = "ok"; c.warning = x.warning; if (N.mode === "nvr") c.added_nvr = true; else c.added_direct = true; }
+          else if (x.code === "camera_exists") { c.status = ""; if (N.mode === "nvr") c.added_nvr = true; else c.added_direct = true; }
+          else { c.status = "error"; c.error = x.error; c.code = x.code; }
+        });
+        CVMS.toast(t("add.bulk_done", { n: res.added, total: targets.length }), res.added === targets.length ? "ok" : "warn");
+        await loadCameras();
+        if (S.afterSave) S.afterSave();
+      } catch (e) {
+        targets.forEach((c) => { if (c.status === "adding") { c.status = "error"; c.error = e.message; } });
+        CVMS.err(e);
+      } finally { N.busy = false; renderList(); }
+      return true; // keep the dialog open to show per-channel results
+    }
+
+    CVMS.modal({
+      title: t("add.nvr_title"),
+      wide: true,
+      body: el("div", null,
+        el("p", { class: "muted", style: { fontSize: "12px", margin: "0 0 12px" } }, t("add.nvr_sub")),
+        el("div", { class: "form-row" }, CVMS.field(t("add.ip"), f.host), CVMS.field(t("add.http_port"), f.port)),
+        el("div", { class: "form-row" }, CVMS.field(t("auth.username"), f.user), CVMS.field(t("auth.password"), f.pass)),
+        fetchBtn, listBox, modeBox),
+      actions: [{ label: t("common.close") }],
     });
   }
 

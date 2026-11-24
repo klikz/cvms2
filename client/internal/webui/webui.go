@@ -100,6 +100,8 @@ func (s *Server) Handler() http.Handler {
 			r.Post("/cameras/bulk", s.handleBulk)
 			r.Post("/scan", s.handleScan)
 			r.Post("/rtsp/find", s.handleRTSPFind)
+			r.Post("/nvr/channels", s.handleNVRChannels)
+			r.Post("/nvr/add", s.handleNVRAdd)
 			r.Post("/discover", s.handleDiscover)
 			r.Post("/onvif/probe", s.handleONVIFProbe)
 			r.Post("/rtsp/probe", s.handleRTSPProbe)
